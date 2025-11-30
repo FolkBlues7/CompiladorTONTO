@@ -1,0 +1,31 @@
+import CoreDatatypes
+import University
+
+package PersonPhases
+
+kind Person {
+name : string [1..*]
+age : number [1]
+birthDate : date [1] { const }
+eyeColor : EyeColor [1..*]
+phoneNumber : CoreDatatypes . PhoneNumber [0..*]
+}
+
+type PersonTypeByAge
+
+phase Child ( instanceOf PersonTypeByAge )
+phase Teenager ( instanceOf PersonTypeByAge )
+phase Adult ( instanceOf PersonTypeByAge )
+
+genset PhasesOfPerson {
+general Person
+categorizer PersonTypeByAge
+specifics Child , Teenager , Adult
+}
+
+role UniversityStudent specializes Person
+role FormerStudent specializes UniversityStudent
+role ActiveStudent specializes UniversityStudent
+
+role Employee specializes Person
+role UniversityProfessor specializes Employee

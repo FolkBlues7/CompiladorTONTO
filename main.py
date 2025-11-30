@@ -1,26 +1,24 @@
-# Importa o objeto lexer do módulo lexer
-from lexer.lexer import lexer
-# Importa 'os' para manipulação de caminhos de arquivo
 import os
-# Importa 'sys' para funções de sistema (não usado diretamente, mas boa prática)
 import sys
-# Importa a classe Counter para facilitar a contagem dos tokens
+import json  # <-- Importante para formatar a AST
 from collections import Counter
-# Importa o módulo JSON para formatar a AST
-import json 
 
-# Importa o analisador sintático (CERTIFIQUE-SE DE QUE ESTE CAMINHO ESTÁ CORRETO)
-# Assumindo que este import existe para as funções auxiliares
-from parser.parser import parse_tonto_code 
+# --- Importações dos nossos módulos ---
+
+# (REQUISITO 2) Importa o lexer, necessário para a Análise Léxica (Fase 1)
+from lexer.lexer import lexer
+
+# Importa a função principal do parser (Fase 2)
+from parser.parser import parse_tonto_code
 
 # =============================================================================
-# EXEMPLOS DE ENTRADA (MANTIDOS)
+# EXEMPLOS DE ENTRADA (REQUISITO 1: Mantidos)
 # =============================================================================
 
 TEST_EXAMPLES = {
-    '1': {
-        'name': 'CarOwnershipExample',
-        'code': """
+    "1": {
+        "name": "CarOwnershipExample",
+        "code": """
 // Exemplo 1: Car Ownership
 package CarOwnership 
 
@@ -35,11 +33,11 @@ relator CarOwnership {
     @mediation
     -- involvesProperty -- [1] Car
 }
-"""
+""",
     },
-    '2': {
-        'name': 'CarRentalExample',
-        'code': """
+    "2": {
+        "name": "CarRentalExample",
+        "code": """
 // Exemplo 2: Car Rental
 package CarRental 
 
@@ -89,11 +87,11 @@ relator CarRental {
     @mediation
     -- involvesCustomer --[1] Customer
 }
-"""
+""",
     },
-    '3': {
-        'name': 'FoodAllergyExample',
-        'code': """
+    "3": {
+        "name": "FoodAllergyExample",
+        "code": """
 // Exemplo 3: Alergia Alimentar
 import alergiaalimentar
 
@@ -211,11 +209,11 @@ genset disjoint_complete {
     general Tratamento
     specifics Imunoterapia_Oral, Medicamento, Dieta_de_Exclusao
 }
-"""
+""",
     },
-    '4': {
-        'name': 'TDAHExample',
-        'code': """
+    "4": {
+        "name": "TDAHExample",
+        "code": """
 // Exemplo 4: TDAH
 import TDAH
 
@@ -324,22 +322,163 @@ disjoint complete genset PhasesOfAPatient{
     general Patient
     specifics Preschool_Age, School_Age, Adult, Teenager
 }
-"""
-    }
+""",
+    },
 }
 
+
+def imprimir_relatorio_amigavel(ast):
+    """
+    Transforma a AST bruta em uma árvore visual amigável.
+    Versão atualizada para suportar Relations com Source/Target Cardinality.
+    """
+    print("\n" + "="*60)
+    print("RESUMO ESTRUTURAL DA ONTOLOGIA".center(60))
+    print("="*60)
+
+    # 1. PACOTE
+    pkg_name = ast['package']['name']
+    print(f"\n📦 PACOTE: {pkg_name}")
+    
+    # 2. IMPORTS
+    if ast['imports']:
+        print("   └── 📥 IMPORTS:")
+        for imp in ast['imports']:
+            print(f"       • {imp['target']}")
+
+    print("   │")
+
+    # 3. DECLARAÇÕES
+    declarations = ast['declarations']
+    if not declarations:
+        print("   └── (Nenhuma declaração encontrada)")
+        return
+
+    for i, decl in enumerate(declarations):
+        is_last_decl = (i == len(declarations) - 1)
+        prefix = "   └──" if is_last_decl else "   ├──"
+        sub_prefix = "       " if is_last_decl else "   │   "
+
+        tipo = decl.get('type')
+
+        # --- VISUALIZAÇÃO DE CLASSE ---
+        if tipo == 'ClassDeclaration':
+            stereo = decl['stereotype']
+            name = decl['name']
+            specs = decl['specializes']
+            nature = decl['nature']
+            
+            # Cabeçalho
+            info_extra = ""
+            if nature: info_extra += f" ({nature})"
+            if specs:  info_extra += f" ➡️ Specializes: {', '.join(specs)}"
+            
+            print(f"{prefix} 📄 CLASSE: {name}")
+            print(f"{sub_prefix}├── Estereótipo: <<{stereo}>>{info_extra}")
+
+            # Corpo
+            body = decl.get('body')
+            members = body['members'] if body and 'members' in body else []
+            
+            if not members:
+                print(f"{sub_prefix}└── (Sem atributos ou relações internas)")
+            else:
+                for j, member in enumerate(members):
+                    is_last_mem = (j == len(members) - 1)
+                    mem_pref = "└──" if is_last_mem else "├──"
+                    
+                    if member['type'] == 'Attribute':
+                        # Atributos usam 'cardinality' simples
+                        card = member.get('cardinality')
+                        card_str = f" [{card}]" if card else ""
+                        constr = f" {{{member['constraints'][0]}}}" if member.get('constraints') else ""
+                        print(f"{sub_prefix}{mem_pref} 🔹 [Atributo] {member['name']} : {member['datatype']}{card_str}{constr}")
+                    
+                    elif member['type'] == 'RelationPole':
+                        # Relações agora usam target/source cardinality
+                        tgt_card = member.get('target_cardinality') or member.get('cardinality') or "1"
+                        src_card = member.get('source_cardinality')
+                        
+                        src_str = f"[{src_card}] " if src_card else ""
+                        arrow = member.get('arrow', '--')
+                        rel_name = member.get('name')
+                        name_str = f" {rel_name} " if rel_name else " "
+                        
+                        target_cls = member.get('target_class') or member.get('target')
+
+                        print(f"{sub_prefix}{mem_pref} 🔗 [Relação] {src_str}{arrow}{name_str}[{tgt_card}] ➝ {target_cls}")
+
+        # --- VISUALIZAÇÃO DE RELAÇÃO EXTERNA (Relator) ---
+        elif tipo == 'RelationDeclaration':
+            print(f"{prefix} 🔗 RELAÇÃO EXTERNA: {decl['name']}")
+            print(f"{sub_prefix}├── Tipo: <<{decl['relation_type']}>>")
+            
+            body = decl.get('body')
+            members = body['members'] if body and 'members' in body else []
+            
+            if members:
+                 for j, member in enumerate(members):
+                    is_last_mem = (j == len(members) - 1)
+                    mem_pref = "└──" if is_last_mem else "├──"
+                    
+                    if member['type'] == 'RelationPole':
+                         # Lógica adaptada para relator
+                         tgt_card = member.get('target_cardinality') or member.get('cardinality') or "1"
+                         src_card = member.get('source_cardinality')
+                         src_str = f"[{src_card}] " if src_card else ""
+                         arrow = member.get('arrow', '--')
+                         target_cls = member.get('target_class') or member.get('target')
+                         
+                         print(f"{sub_prefix}{mem_pref} Conecta: {src_str}{arrow} [{tgt_card}] ➝ {target_cls}")
+            else:
+                print(f"{sub_prefix}└── (Sem conexões definidas)")
+
+        # --- VISUALIZAÇÃO DE ENUM ---
+        elif tipo == 'EnumDeclaration':
+            print(f"{prefix} 🔢 ENUM: {decl['name']}")
+            membros = ", ".join(decl['members'])
+            print(f"{sub_prefix}└── Valores: {{{membros}}}")
+
+        # --- VISUALIZAÇÃO DE DATATYPE ---
+        elif tipo == 'DataTypeDeclaration':
+            print(f"{prefix} 💾 DATATYPE: {decl['name']}")
+            attrs = decl['attributes']
+            if not attrs:
+                 print(f"{sub_prefix}└── (Vazio)")
+            else:
+                for j, attr in enumerate(attrs):
+                    is_last_mem = (j == len(attrs) - 1)
+                    mem_pref = "└──" if is_last_mem else "├──"
+                    print(f"{sub_prefix}{mem_pref} • {attr['name']} : {attr['datatype']}")
+
+        # --- VISUALIZAÇÃO DE GENSET ---
+        elif tipo == 'GeneralizationSet':
+            print(f"{prefix} 🔱 GENSET: {decl['name']}")
+            mods = ", ".join(decl['modifiers']) if decl['modifiers'] else "Normal"
+            cat = f" (Categorizer: {decl['categorizer']})" if decl.get('categorizer') else ""
+            
+            print(f"{sub_prefix}├── Propriedades: {{{mods}}}{cat}")
+            print(f"{sub_prefix}├── Geral: {decl['general']}")
+            print(f"{sub_prefix}└── Específicos: {', '.join(decl['specifics'])}")
+            
+        # --- VISUALIZAÇÃO DE TYPE (High Order) ---
+        elif tipo == 'HighOrderType':
+            print(f"{prefix} 🆙 TYPE: {decl['name']}")
+
+    print("\n" + "="*60 + "\n")
+
+
 # =============================================================================
-# FUNÇÕES DE ANÁLISE (AUXILIARES - MANTIDAS)
+# FUNÇÕES DE ANÁLISE
 # =============================================================================
 
-def executar_analise_lexica(codigo_para_analise, nome_do_teste):
-    """Executa a análise léxica."""
-    print("\n" + "#" * 50)
-    print(f" EXECUTANDO ANÁLISE LÉXICA: {nome_do_teste}".center(50))
-    print("#" * 50)
-    
+
+def run_analysis_lexica(codigo_para_analise, nome_do_teste):
+    """Executa a ANÁLISE LÉXICA (Fase 1)"""
+    print(f"\n--- Iniciando Análise LÉXICA para: {nome_do_teste} ---")
+
     token_counts = Counter()
-    lexer.lineno = 1 
+    lexer.lineno = 1
     lexer.input(codigo_para_analise)
 
     print("\n=== VISÃO ANALÍTICA (LISTA DE TOKENS) ===")
@@ -347,148 +486,125 @@ def executar_analise_lexica(codigo_para_analise, nome_do_teste):
         token = lexer.token()
         if not token:
             break
-        print(f"  [Tipo: {token.type:<20} Lexema: '{token.value}' Linha: {token.lineno}]")
+        print(
+            f"  [Tipo: {token.type:<20} Lexema: '{token.value}' Linha: {token.lineno}]"
+        )
         token_counts[token.type] += 1
-        
-    print("\n" + "="*50)
-    print("=== TABELA DE SÍNTESE (CONTAGEM DE TOKENS) ===".center(50))
-    print("="*50)
 
+    print("\n" + "=" * 50)
+    print("=== TABELA DE SÍNTESE (CONTAGEM DE TOKENS) ===".center(50))
+    print("=" * 50)
     if not token_counts:
         print("Nenhum token foi encontrado.")
     else:
         for token_type, count in sorted(token_counts.items()):
-            print(f"  {token_type:<25}: {count}")
+            print(f"  {token_type:<25}: {count}")
+    print("\n--- Análise Léxica Concluída ---")
 
-def executar_analise_sintatica(codigo_para_analise, nome_do_teste):
-    """Executa a análise sintática do código usando o parser PLY."""
-    
-    print("\n" + "#" * 50)
-    print(f" EXECUTANDO ANÁLISE SINTÁTICA: {nome_do_teste}".center(50))
-    print("#" * 50)
-    
-    try:
-        # Chama a função principal de parse do seu parser.py
-        resultado_ast = parse_tonto_code(codigo_para_analise)
-        
-        if resultado_ast is not None:
-            print("\n[SUCESSO] Código aceito pela gramática (até o momento)!")
-            print("\n=== ÁRVORE DE SINTAXE ABSTRATA (AST) ===")
-            print(json.dumps(resultado_ast, indent=4, ensure_ascii=False)) 
-        else:
-            print("\n[FALHA SINTÁTICA] O parser rejeitou o código. Verifique as mensagens de erro.")
-            
-    except Exception as e:
-        print(f"\n[ERRO INESPERADO DO PARSER] Falha na execução: {e}")
+
+def run_analysis_sintatica(codigo_para_analise, nome_do_teste):
+    """Executa a ANÁLISE SINTÁTICA (Fase 2)"""
+    print(f"\n--- Iniciando Análise SINTÁTICA para: {nome_do_teste} ---")
+
+    ast_result = parse_tonto_code(codigo_para_analise)
+
+    if ast_result:
+        print("\n[SUCESSO] A estrutura sintática está CORRETA. Gerando relatório...")
+
+        # 1. Opção de ver o JSON puro (útil para debug)
+        # print(json.dumps(ast_result, indent=2))
+
+        # 2. NOVA VISUALIZAÇÃO AMIGÁVEL
+        imprimir_relatorio_amigavel(ast_result)
+
+    else:
+        print("\n[FALHA] A análise sintática falhou.")
+        print("Verifique os erros reportados acima.")
+
+
+def run_analysis_semantica(codigo_para_analise, nome_do_teste):
+    """Placeholder para a ANÁLISE SEMÂNTICA (Fase 3)"""
+    print(f"\n--- Iniciando Análise SEMÂNTICA para: {nome_do_teste} ---")
+    print("\n[PENDENTE] A Análise Semântica (Fase 3) ainda não foi implementada.")
+
 
 # =============================================================================
-# FUNÇÃO PRINCIPAL (FLUXO INVERTIDO E CORRIGIDO)
+# LOOP PRINCIPAL (MAIN)
 # =============================================================================
+
 
 def main():
+    analysis_functions = {
+        "1": ("Análise Léxica (Fase 1)", run_analysis_lexica),
+        "2": ("Análise Sintática (Fase 2)", run_analysis_sintatica),
+        "3": ("Análise Semântica (Fase 3)", run_analysis_semantica),
+    }
+
     while True:
-        # ====================================================
-        # 1. ESCOLHA DO TIPO DE ANÁLISE (PRIMEIRO PASSO)
-        # ====================================================
-        print("\n" + "="*50)
-        print(" 1. SELECIONE O TIPO DE ANÁLISE ".center(50))
-        print("="*50)
-        print(" 1. Análise Léxica")
-        print(" 2. Análise Sintática")
-        print(" 3. Análise Semântica (Em desenvolvimento)")
-        print(" Q. Sair")
-        print("-" * 50)
+        print("\n" + "=" * 60)
+        print("  ANALISADOR DE LINGUAGEM TONTO".center(60))
+        print("=" * 60)
+        print("Selecione o TIPO de análise que deseja executar:")
+        for key, (name, _) in analysis_functions.items():
+            print(f"  {key}. {name}")
+        print("  Q. Sair")
 
-        tipo_analise = input("Digite sua escolha: ").strip().upper()
+        tipo_escolha = input("Digite sua escolha: ").strip().upper()
 
-        if tipo_analise == 'Q':
-            print("Encerrando o analisador. Até logo!")
+        if tipo_escolha == "Q":
+            print("Saindo...")
             break
 
-        if tipo_analise not in ['1', '2', '3']:
-            print("Opção inválida. Tente novamente.")
+        if tipo_escolha not in analysis_functions:
+            print("Opção inválida.")
             continue
-            
-        # Variável para armazenar a função a ser executada
-        funcao_analise = None
-        
-        if tipo_analise == '1':
-            funcao_analise = executar_analise_lexica
-        elif tipo_analise == '2':
-            funcao_analise = executar_analise_sintatica
-        elif tipo_analise == '3':
-            print("\n[INFO] Análise Semântica selecionada. Esta funcionalidade está em desenvolvimento e será tratada como placeholder.")
-            # Definir uma função placeholder para Semântica se necessário, ou prosseguir
 
-        # ====================================================
-        # 2. ESCOLHA DO CÓDIGO FONTE (SEGUNDO PASSO)
-        # ====================================================
+        selected_analysis_name, funcao_analise = analysis_functions[tipo_escolha]
 
         while True:
-            print("\n" + "="*50)
-            print(f" 2. SELECIONE O CÓDIGO FONTE para '{tipo_analise}'".center(50))
-            print("="*50)
-            
-            # Lista as opções de teste
-            for key, example in TEST_EXAMPLES.items():
-                print(f" {key}. {example['name']}")
-                
-            print(" 5. Testar Arquivo Externo (.tonto)")
-            print(" B. Voltar ao menu de Análise")
-            print("-" * 50)
-            
-            escolha_codigo = input("Digite o número do teste (ou B para Voltar): ").strip().upper()
+            print("\n" + "-" * 60)
+            print(f"Executando: {selected_analysis_name}")
+            print("Selecione uma opção para analisar:")
 
-            if escolha_codigo == 'B':
-                break # Volta ao menu principal (Seleção de Tipo de Análise)
-            
+            for key, example in TEST_EXAMPLES.items():
+                print(f"  {key}. {example['name']}")
+            print("  E. Analisar um arquivo externo (.tonto)")
+            print("  V. Voltar ao menu anterior")
+
+            exemplo_escolha = input("Digite sua escolha: ").strip().upper()
+
+            if exemplo_escolha == "V":
+                break
+
             codigo_para_analise = ""
             nome_do_teste = ""
 
-            # A. CARREGAR O CÓDIGO FONTE
-            if escolha_codigo in TEST_EXAMPLES:
-                exemplo_selecionado = TEST_EXAMPLES[escolha_codigo]
-                codigo_para_analise = exemplo_selecionado['code']
-                nome_do_teste = exemplo_selecionado['name']
-                
-            elif escolha_codigo == '5': 
-                print("\n--- INSTRUÇÕES PARA ARQUIVO EXTERNO ---")
-                print("1. Coloque o arquivo .tonto em um local acessível.")
-                print("2. Digite o caminho completo do arquivo.")
-                print("---------------------------------------")
-                file_path = input("Digite o caminho do arquivo .tonto: ").strip()
-                
+            if exemplo_escolha in TEST_EXAMPLES:
+                codigo_para_analise = TEST_EXAMPLES[exemplo_escolha]["code"]
+                nome_do_teste = TEST_EXAMPLES[exemplo_escolha]["name"]
+
+            elif exemplo_escolha == "E":
+                file_path = input(
+                    "Digite o caminho completo para o arquivo .tonto: "
+                ).strip()
                 if not os.path.exists(file_path):
-                    print(f"\n[ERRO] Arquivo não encontrado no caminho: {file_path}")
-                    continue 
-                
+                    print(f"\n[ERRO] Arquivo não encontrado: {file_path}")
+                    continue
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, "r", encoding="utf-8") as f:
                         codigo_para_analise = f.read()
                     nome_do_teste = f"Arquivo Externo: {os.path.basename(file_path)}"
                 except Exception as e:
                     print(f"\n[ERRO] Não foi possível ler o arquivo: {e}")
-                    continue 
-                    
-            else: 
-                print("Opção inválida. Tente novamente.")
-                continue 
-            
-            # ====================================================
-            # 3 & 4. EXECUTAR ANÁLISE
-            # ====================================================
-            
-            print("\n=== CÓDIGO FONTE CARREGADO ===")
-            print(codigo_para_analise)
-            print("---------------------------------")
+                    continue
+            else:
+                print("Opção inválida.")
+                continue
 
-            if funcao_analise:
-                funcao_analise(codigo_para_analise, nome_do_teste)
-            else: # Caso Semântica (3) tenha sido selecionada, e não haja função
-                print(f"\n[RESULTADO] Análise Semântica para '{nome_do_teste}' concluída (placeholder).")
-
+            # Executa a análise
+            funcao_analise(codigo_para_analise, nome_do_teste)
             input("\nPressione ENTER para continuar...")
-            break # Volta ao menu principal (Seleção de Tipo de Análise)
+            break
 
 
 if __name__ == "__main__":

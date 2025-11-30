@@ -1,0 +1,13 @@
+package MedicalExamProcess
+
+kind Person
+subkind Patient specializes Person
+kind DiagnosticTest
+
+relator TestRequest {
+    @mediation
+    -- requiresPatient -- [1] Patient
+
+    @mediation
+    -- requiresTest -- [1] DiagnosticTest
+}

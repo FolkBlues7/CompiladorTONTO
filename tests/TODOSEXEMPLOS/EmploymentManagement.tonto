@@ -1,0 +1,14 @@
+package EmploymentManagement
+
+kind Organization
+subkind Employer specializes Organization
+kind Person
+subkind Employee specializes Person
+
+relator WorkContract {
+    @mediation
+    -- involvesEmployer -- [1] Employer
+
+    @mediation
+    -- involvesEmployee -- [1] Employee
+}

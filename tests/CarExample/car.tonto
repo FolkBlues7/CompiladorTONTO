@@ -11,4 +11,3 @@ relator CarOwnership {
     @mediation
     -- involvesProperty -- [1] Car
 }
-.
