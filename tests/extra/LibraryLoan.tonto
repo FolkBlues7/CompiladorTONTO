@@ -1,0 +1,13 @@
+package LibraryLoan
+
+kind Institution
+subkind PublicLibrary specializes Institution
+kind Book
+
+relator LoanRecord {
+    @mediation
+    -- involvesLibrary -- [1] PublicLibrary
+
+    @mediation
+    -- involvesBook -- [1] Book
+}
