@@ -1,0 +1,13 @@
+package PropertyRental
+
+kind Person
+subkind Tenant specializes Person
+kind RealEstateUnit
+
+relator RentalAgreement {
+    @mediation
+    -- bindsTenant -- [1] Tenant
+
+    @mediation
+    -- bindsUnit -- [1] RealEstateUnit
+}

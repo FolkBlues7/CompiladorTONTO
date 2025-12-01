@@ -1,0 +1,37 @@
+import CoreDatatypes
+import PersonPhases
+package University
+
+category Organization
+
+kind University specializes Organization {
+address : Address
+@componentOf
+[1] <>-- has -- [1..*] Department
+}
+
+kind Department {
+name : string
+@componentOf
+[1] <>-- [1] JuniorStaff
+@componentOf
+[1] <>-- [1] SeniorStaff
+}
+
+collective Staff {
+[1] <o>-- hasMember -- [0..*] Employee
+}
+
+subkind JuniorStaff specializes Staff
+subkind SeniorStaff specializes Staff
+
+roleMixin Employer
+
+role UniversityEmployer specializes Employer ,
+
+relator EmploymentContract {
+@mediation
+[1..*] -- [1] Employee
+@mediation
+[1..*] -- [1] Employer
+}

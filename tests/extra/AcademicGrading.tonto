@@ -1,0 +1,13 @@
+package AcademicGrading
+
+kind Individual
+subkind Student specializes Individual
+kind Course
+
+relator GradeAssignment {
+    @mediation
+    -- assignsStudent -- [1] Student
+
+    @mediation
+    -- assignsCourse -- [1] Course
+}
