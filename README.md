@@ -165,86 +165,114 @@ kind Person
   UNDERMAINTENANCECAR        : 1
 ```
 
-## 🧩 Fase 2 — Análise Sintática (Parser)
 
-Além da análise léxica, o projeto agora implementa a segunda fase do compilador, responsável por verificar se a estrutura da ontologia TONTO está sintaticamente correta.
-A interação foi ampliada para permitir escolher entre análise léxica, sintática e (futuramente) semântica.
+---
 
-Ao executar python main.py, o menu inicial é:
-```
-============================================================
-                ANALISADOR DE LINGUAGEM TONTO
-============================================================
-Selecione o TIPO de análise que deseja executar:
-  1. Análise Léxica (Fase 1)
-  2. Análise Sintática (Fase 2)
-  3. Análise Semântica (Fase 3)
-  Q. Sair
-Digite sua escolha:
+## 🏗️ Fase 2 — Análise Sintática (Parser)
 
+A segunda fase do projeto implementa o **Analisador Sintático**. Enquanto o Lexer identifica as palavras, o Parser valida a gramática e constrói o sentido estrutural do código, gerando uma **Árvore Sintática Abstrata (AST)**.
 
-Escolhendo a opção 2, o menu de testes sintáticos é apresentado:
+Esta etapa foi projetada para lidar com a alta flexibilidade da linguagem TONTO, suportando definições aninhadas, cardinalidades opcionais e diferentes estilos de declaração.
 
-------------------------------------------------------------
-Executando: Análise Sintática (Fase 2)
-Selecione uma opção para analisar:
-  1. CarOwnershipExample
-  2. CarRentalExample
-  3. FoodAllergyExample
-  4. TDAHExample
-  6. Analisar um arquivo externo (.tonto)
-  V. Voltar ao menu anterior
-Digite sua escolha:
+### 🚀 Destaques da Implementação Sintática
 
+1.  **Suporte a Relações Complexas**:
+    * **Relações Inline**: Captura relações definidas em uma única linha (ex: `@material relation A [1] -- faz -- [1] B`).
+    * **Relatores (Bloco)**: Processa entidades relacionais complexas (`relator`) que contêm múltiplas mediações internas.
+    * **Tratamento de Cardinalidades**: Reconhece cardinalidades opcionais tanto na origem quanto no destino (`[1..*]`), além de identificar corretamente a direção das setas (`<>--`, `--<>`, `--`).
 
-Ao selecionar um dos exemplos (por exemplo, o CarOwnershipExample), o parser executa as validações sintáticas e gera um relatório estrutural:
+2.  **Generalization Sets (Gensets)**:
+    * Reconhece as duas formas de declaração: a forma linear (`where ...`) e a forma em bloco (`{ general ... specifics ... }`).
+    * Suporte completo a modificadores (`disjoint`, `complete`) e categorizadores (`categorizer`).
 
---- Iniciando Análise SINTÁTICA para: CarOwnershipExample ---
+3.  **Visualização Hierárquica Amigável**:
+    * Em vez de apenas exibir um JSON bruto, o sistema renderiza uma **Árvore Visual** no terminal.
+    * Isso permite entender rapidamente a hierarquia de Pacotes, Classes, Atributos e como as Relações conectam as entidades.
 
-[SUCESSO] A estrutura sintática está CORRETA. Gerando relatório...
+### 💻 Exemplos de Entrada e Saída
 
-============================================================
-               RESUMO ESTRUTURAL DA ONTOLOGIA
-============================================================
+#### Exemplo 1: Relatores e Relações Inline (Caso "Pizzaria")
 
-📦 PACOTE: CarOwnership
+**Código Fonte (`.tonto`):**
+```tonto
+import Pessoa
+package Pizzaria
+
+@material relation Cliente [1..*] -- solicita -- [1..*] Pizza
+
+relator Atendimento {
+    @mediation [1..*] -- [1..*] Atendente
+    @mediation [1..*] -- [1..*] Cliente
+    @mediation [1..*] -- [1..*] Item
+}
+````
+
+**Saída Visual do Parser:**
+
+```text
+📥 IMPORTS:
+   • Pessoa
+
    │
-   ├── 📄 CLASSE: Organization
-   │   ├── Estereótipo: <<kind>>
-   │   └── (Sem atributos ou relações internas)
-   ├── 📄 CLASSE: CarAgency
-   │   ├── Estereótipo: <<subkind>> ➡️ Specializes: Organization
-   │   └── (Sem atributos ou relações internas)
-   ├── 📄 CLASSE: Car
-   │   ├── Estereótipo: <<kind>>
-   │   └── (Sem atributos ou relações internas)
-   └── 🔗 RELAÇÃO EXTERNA: CarOwnership
+   ▼
+📦 PACOTE: Pizzaria
+   │
+   ├── ⚡ RELAÇÃO INLINE: solicita
+   │   ├── Estereótipo: <<material>>
+   │   └── Cliente [1..*] -- solicita -- [1..*] Pizza
+   │
+   └── 🔗 RELAÇÃO EXTERNA: Atendimento
        ├── Tipo: <<relator>>
-       ├── Conecta: -- involvesOwner [1] ➝ CarAgency
-       └── Conecta: -- involvesProperty [1] ➝ Car
-
-============================================================
-
-Pressione ENTER para continuar...
+       ├── Conecta: <<mediation>> [1..*] -- [1..*] ➝ Atendente
+       ├── Conecta: <<mediation>> [1..*] -- [1..*] ➝ Cliente
+       └── Conecta: <<mediation>> [1..*] -- [1..*] ➝ Item
 ```
 
-A estrutura acima é gerada dinamicamente com base nos nós sintáticos identificados pelo parser.
+#### Exemplo 2: Classes e Gensets
 
-## 🔍 Fase 3 — Análise Semântica (Em Construção)
+**Código Fonte (`.tonto`):**
 
-A terceira fase do compilador — a análise semântica — está sendo desenvolvida e será responsável por verificar:
+```tonto
+package Genealogy
 
-consistência entre estereótipos e tipos ontológicos
+kind Person
+phase Child specializes Person
+phase Adult specializes Person
 
-correspondência entre papéis e classes que os suportam
+genset LifeStages {
+    general Person
+    specifics Child, Adult
+}
+```
 
-coerência das cardinalidades
+**Saída Visual do Parser:**
 
-restrições semânticas de relações e relators
+```text
+📦 PACOTE: Genealogy
+   │
+   ├── 📄 CLASSE: Person
+   │   ├── Estereótipo: <<kind>>
+   │   └── (Sem atributos ou relações internas)
+   ├── 📄 CLASSE: Child
+   │   ├── Estereótipo: <<phase>> ➡️ Specializes: Person
+   │   └── (Sem atributos ou relações internas)
+   ├── 📄 CLASSE: Adult
+   │   ├── Estereótipo: <<phase>> ➡️ Specializes: Person
+   │   └── (Sem atributos ou relações internas)
+   └── 🔱 GENSET: LifeStages
+       ├── Propriedades: Normal
+       ├── Geral: Person
+       └── Específicos: Child, Adult
+```
+## 🔍 Fase 3 — Análise Semântica (Em Breve)
 
-herança e especialização compatíveis
+A próxima etapa consistirá na validação das regras lógicas da ontologia, como:
 
-O menu já está implementado e pode ser selecionado:
+  * Verificação de tipos incompatíveis.
+  * Consistência das cardinalidades e naturezas ontológicas.
+  * Checagem de identificadores não declarados.
 
-[EM CONSTRUÇÃO] A Fase 3 ainda não está disponível.
-Retorne ao menu para escolher outra opção.
+<!-- end list -->
+
+```
+```
