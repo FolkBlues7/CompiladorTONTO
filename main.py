@@ -5,11 +5,14 @@ from collections import Counter
 
 # --- Importações dos nossos módulos ---
 
-# (REQUISITO 2) Importa o lexer, necessário para a Análise Léxica (Fase 1)
+# Importa o lexer, necessário para a Análise Léxica (Fase 1)
 from lexer.lexer import lexer
 
 # Importa a função principal do parser (Fase 2)
 from parser.parser import parse_tonto_code
+
+# Importação da Análise Semântica (Fase 3)
+from semantic.semantic import run_semantic_checks, format_unified_output
 
 # =============================================================================
 # EXEMPLOS DE ENTRADA (REQUISITO 1: Mantidos)
@@ -332,156 +335,181 @@ def imprimir_relatorio_amigavel(ast):
     Transforma a AST bruta em uma árvore visual amigável.
     Versão Final Blindada: Aceita RelationPole e InternalRelationPole.
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("RESUMO ESTRUTURAL DA ONTOLOGIA".center(60))
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     # 1. IMPORTS
-    if ast.get('imports'):
+    if ast.get("imports"):
         print("📥 IMPORTS:")
-        for imp in ast['imports']:
+        for imp in ast["imports"]:
             print(f"   • {imp['target']}")
         print("\n   │")
         print("   ▼")
 
     # 2. PACOTE
-    pkg_name = ast['package']['name']
+    pkg_name = ast["package"]["name"]
     print(f"📦 PACOTE: {pkg_name}")
-    
+
     # 3. DECLARAÇÕES
-    declarations = ast['declarations']
+    declarations = ast["declarations"]
     if not declarations:
         print("   └── (Nenhuma declaração encontrada)")
         return
 
-    print("   │") # Linha conectora vertical
+    print("   │")  # Linha conectora vertical
 
     for i, decl in enumerate(declarations):
-        is_last_decl = (i == len(declarations) - 1)
+        is_last_decl = i == len(declarations) - 1
         prefix = "   └──" if is_last_decl else "   ├──"
         sub_prefix = "       " if is_last_decl else "   │   "
 
-        tipo = decl.get('type')
+        tipo = decl.get("type")
 
         # --- CLASSE ---
-        if tipo == 'ClassDeclaration':
-            stereo = decl['stereotype']
-            name = decl['name']
-            specs = decl['specializes']
-            nature = decl['nature']
-            
+        if tipo == "ClassDeclaration":
+            stereo = decl["stereotype"]
+            name = decl["name"]
+            specs = decl["specializes"]
+            nature = decl["nature"]
+
             info_extra = ""
-            if nature: info_extra += f" ({nature})"
-            if specs:  info_extra += f" ➡️ Specializes: {', '.join(specs)}"
-            
+            if nature:
+                info_extra += f" ({nature})"
+            if specs:
+                info_extra += f" ➡️ Specializes: {', '.join(specs)}"
+
             print(f"{prefix} 📄 CLASSE: {name}")
             print(f"{sub_prefix}├── Estereótipo: <<{stereo}>>{info_extra}")
 
-            body = decl.get('body')
-            members = body.get('members', []) if body else []
-            
+            body = decl.get("body")
+            members = body.get("members", []) if body else []
+
             if not members:
                 print(f"{sub_prefix}└── (Sem atributos ou relações internas)")
             else:
                 for j, member in enumerate(members):
-                    is_last_mem = (j == len(members) - 1)
+                    is_last_mem = j == len(members) - 1
                     mem_pref = "└──" if is_last_mem else "├──"
-                    
-                    if member['type'] == 'Attribute':
-                        card = member.get('cardinality')
+
+                    if member["type"] == "Attribute":
+                        card = member.get("cardinality")
                         card_str = f" [{card}]" if card else ""
                         # Proteção para constraints que podem não existir
-                        con_list = member.get('constraints', [])
+                        con_list = member.get("constraints", [])
                         constr = f" {{{con_list[0]}}}" if con_list else ""
-                        print(f"{sub_prefix}{mem_pref} 🔹 [Atributo] {member['name']} : {member['datatype']}{card_str}{constr}")
-                    
-                    # Aceita RelationPole OU InternalRelationPole
-                    elif member['type'] in ['RelationPole', 'InternalRelationPole']:
-                        # Normaliza os nomes dos campos (source/left e target/right)
-                        tgt_card = member.get('target_cardinality') or member.get('right_cardinality') or member.get('cardinality') or "1"
-                        src_card = member.get('source_cardinality') or member.get('left_cardinality')
-                        
-                        src_str = f"[{src_card}] " if src_card else ""
-                        arrow = member.get('arrow', '--')
-                        
-                        rel_name = member.get('name')
-                        name_str = f" {rel_name} " if rel_name else " "
-                        
-                        target_cls = member.get('target_class') or member.get('target')
+                        print(
+                            f"{sub_prefix}{mem_pref} 🔹 [Atributo] {member['name']} : {member['datatype']}{card_str}{constr}"
+                        )
 
-                        print(f"{sub_prefix}{mem_pref} 🔗 [Relação] {src_str}{arrow}{name_str}[{tgt_card}] ➝ {target_cls}")
+                    # Aceita RelationPole OU InternalRelationPole
+                    elif member["type"] in ["RelationPole", "InternalRelationPole"]:
+                        # Normaliza os nomes dos campos (source/left e target/right)
+                        tgt_card = (
+                            member.get("target_cardinality")
+                            or member.get("right_cardinality")
+                            or member.get("cardinality")
+                            or "1"
+                        )
+                        src_card = member.get("source_cardinality") or member.get(
+                            "left_cardinality"
+                        )
+
+                        src_str = f"[{src_card}] " if src_card else ""
+                        arrow = member.get("arrow", "--")
+
+                        rel_name = member.get("name")
+                        name_str = f" {rel_name} " if rel_name else " "
+
+                        target_cls = member.get("target_class") or member.get("target")
+
+                        print(
+                            f"{sub_prefix}{mem_pref} 🔗 [Relação] {src_str}{arrow}{name_str}[{tgt_card}] ➝ {target_cls}"
+                        )
 
         # --- RELAÇÃO EXTERNA (Relator) ---
-        elif tipo == 'RelationDeclaration':
+        elif tipo == "RelationDeclaration":
             print(f"{prefix} 🔗 RELAÇÃO EXTERNA: {decl['name']}")
             print(f"{sub_prefix}├── Tipo: <<{decl['relation_type']}>>")
-            
-            body = decl.get('body')
-            members = body.get('members', []) if body else []
-            
+
+            body = decl.get("body")
+            members = body.get("members", []) if body else []
+
             if members:
-                 for j, member in enumerate(members):
-                    is_last_mem = (j == len(members) - 1)
+                for j, member in enumerate(members):
+                    is_last_mem = j == len(members) - 1
                     mem_pref = "└──" if is_last_mem else "├──"
-                    
+
                     # AQUI ESTAVA O PROBLEMA: Aceitamos ambos os tipos agora
-                    if member['type'] in ['RelationPole', 'InternalRelationPole']:
-                         tgt_card = member.get('target_cardinality') or member.get('right_cardinality') or member.get('cardinality') or "1"
-                         src_card = member.get('source_cardinality') or member.get('left_cardinality')
-                         
-                         src_str = f"[{src_card}] " if src_card else ""
-                         arrow = member.get('arrow', '--')
-                         target_cls = member.get('target_class') or member.get('target')
-                         
-                         stereotype = member.get('stereotype')
-                         stereo_str = f"<<{stereotype}>> " if stereotype else ""
-                         
-                         print(f"{sub_prefix}{mem_pref} Conecta: {stereo_str}{src_str}{arrow} [{tgt_card}] ➝ {target_cls}")
+                    if member["type"] in ["RelationPole", "InternalRelationPole"]:
+                        tgt_card = (
+                            member.get("target_cardinality")
+                            or member.get("right_cardinality")
+                            or member.get("cardinality")
+                            or "1"
+                        )
+                        src_card = member.get("source_cardinality") or member.get(
+                            "left_cardinality"
+                        )
+
+                        src_str = f"[{src_card}] " if src_card else ""
+                        arrow = member.get("arrow", "--")
+                        target_cls = member.get("target_class") or member.get("target")
+
+                        stereotype = member.get("stereotype")
+                        stereo_str = f"<<{stereotype}>> " if stereotype else ""
+
+                        print(
+                            f"{sub_prefix}{mem_pref} Conecta: {stereo_str}{src_str}{arrow} [{tgt_card}] ➝ {target_cls}"
+                        )
             else:
                 print(f"{sub_prefix}└── (Sem conexões definidas)")
 
         # --- RELAÇÃO INLINE ---
-        elif tipo == 'InlineRelation':
-            rel_name = decl.get('relation_name') or "(Sem nome)"
+        elif tipo == "InlineRelation":
+            rel_name = decl.get("relation_name") or "(Sem nome)"
             print(f"{prefix} ⚡ RELAÇÃO INLINE: {rel_name}")
             print(f"{sub_prefix}├── Estereótipo: <<{decl['stereotype']}>>")
-            
-            src = decl.get('source_class')
-            src_card = decl.get('source_cardinality')
-            l_arrow = decl.get('left_arrow', '')
-            r_arrow = decl.get('right_arrow', '')
-            tgt_card = decl.get('target_cardinality')
-            tgt = decl.get('target_class')
-            
-            print(f"{sub_prefix}└── {src} [{src_card}] {l_arrow} {rel_name} {r_arrow} [{tgt_card}] {tgt}")
+
+            src = decl.get("source_class")
+            src_card = decl.get("source_cardinality")
+            l_arrow = decl.get("left_arrow", "")
+            r_arrow = decl.get("right_arrow", "")
+            tgt_card = decl.get("target_cardinality")
+            tgt = decl.get("target_class")
+
+            print(
+                f"{sub_prefix}└── {src} [{src_card}] {l_arrow} {rel_name} {r_arrow} [{tgt_card}] {tgt}"
+            )
 
         # --- ENUM ---
-        elif tipo == 'EnumDeclaration':
+        elif tipo == "EnumDeclaration":
             print(f"{prefix} 🔢 ENUM: {decl['name']}")
             print(f"{sub_prefix}└── Valores: {', '.join(decl['members'])}")
 
         # --- DATATYPE ---
-        elif tipo == 'DataTypeDeclaration':
+        elif tipo == "DataTypeDeclaration":
             print(f"{prefix} 💾 DATATYPE: {decl['name']}")
-            if not decl['attributes']: print(f"{sub_prefix}└── (Vazio)")
-            for attr in decl['attributes']:
+            if not decl["attributes"]:
+                print(f"{sub_prefix}└── (Vazio)")
+            for attr in decl["attributes"]:
                 print(f"{sub_prefix}├── • {attr['name']} : {attr['datatype']}")
 
         # --- GENSET ---
-        elif tipo == 'GeneralizationSet':
+        elif tipo == "GeneralizationSet":
             print(f"{prefix} 🔱 GENSET: {decl['name']}")
-            if decl.get('modifiers'):
+            if decl.get("modifiers"):
                 print(f"{sub_prefix}├── Propriedades: {', '.join(decl['modifiers'])}")
             print(f"{sub_prefix}├── Geral: {decl['general']}")
-            if decl.get('categorizer'):
+            if decl.get("categorizer"):
                 print(f"{sub_prefix}├── Categorizador: {decl['categorizer']}")
             print(f"{sub_prefix}└── Específicos: {', '.join(decl['specifics'])}")
-            
+
         # --- TYPE ---
-        elif tipo == 'HighOrderType':
+        elif tipo == "HighOrderType":
             print(f"{prefix} 🆙 TYPE: {decl['name']}")
 
-    print("\n" + "="*60 + "\n")
+    print("\n" + "=" * 60 + "\n")
 
 
 # =============================================================================
@@ -539,9 +567,29 @@ def run_analysis_sintatica(codigo_para_analise, nome_do_teste):
 
 
 def run_analysis_semantica(codigo_para_analise, nome_do_teste):
-    """Placeholder para a ANÁLISE SEMÂNTICA (Fase 3)"""
+    """Executa a ANÁLISE SEMÂNTICA (Fase 3)"""
     print(f"\n--- Iniciando Análise SEMÂNTICA para: {nome_do_teste} ---")
-    print("\n[PENDENTE] A Análise Semântica (Fase 3) ainda não foi implementada.")
+
+    # 1. Obter a Árvore de Sintaxe Abstrata (AST) a partir do código
+    ast_result = parse_tonto_code(codigo_para_analise)
+
+    if not ast_result:
+        print(
+            "\n[FALHA] Não foi possível realizar a Análise Semântica: Erro Sintático Encontrado."
+        )
+        # Se houver erro sintático, a AST é nula ou incompleta e não podemos prosseguir.
+        return
+
+    print("\n[SUCESSO] AST Gerada. Iniciando Verificação de Padrões Semânticos...")
+
+    # 2. Executar as verificações de padrões e coletar resultados
+    # run_semantic_checks retorna (padrões_encontrados, erros_de_validação)
+    found_patterns, validation_errors = run_semantic_checks(ast_result)
+
+    # 3. Formatar e imprimir o relatório unificado (Requisito 3)
+    format_unified_output(found_patterns, validation_errors)
+
+    print("\n--- Análise Semântica Concluída ---")
 
 
 # =============================================================================
