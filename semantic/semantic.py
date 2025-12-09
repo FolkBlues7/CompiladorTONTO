@@ -504,96 +504,200 @@ def check_mode_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
 
 
 # ==============================================================================
-# 6. ROLEMIXIN PATTERN (RoleMixin -> Role(s) + Genset Disjoint OBRIGATÓRIO)
+# 6. ROLEMIXIN PATTERN (RoleMixin -> Roles + Genset Disjoint Obrigatório)
 # ==============================================================================
 def check_rolemixin_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
     """
     Verifica instâncias do RoleMixin Pattern.
-    Regra Semântica Principal: O Genset DEVE ser 'disjoint'.
+
+    Regras Semânticas:
+    ------------------
+    1. Se um RoleMixin for especializado por uma ou mais Roles,
+       ENTÃO deve existir um GeneralizationSet cujo 'general' = RoleMixin.
+
+    2. Este Genset DEVE possuir o modificador 'disjoint'.
+
+    3. O GenSet deve listar AO MENOS duas classes do tipo 'role'.
+
+    4. Todos os 'specifics' do Genset devem ser estereótipo 'role'.
+
+    Retorna:
+        found_patterns: lista de padrões válidos encontrados.
+        semantic_errors: lista de violações semânticas.
     """
     errors = []
     found = []
 
+    # ----------------------------------------------------------------------
+    # 1. COLETA PRELIMINAR
+    # ----------------------------------------------------------------------
     rolemixins = {}
     roles = {}
     gensets_by_general = defaultdict(list)
+    specializes_map = defaultdict(list)
 
-    # 1. Coleta de Declarações
     for decl in ast.get("declarations", []):
         decl_type = decl.get("type")
+
+        # Classes Normais
         if decl_type == "ClassDeclaration":
-            stereotype = decl.get("stereotype")
             name = decl.get("name")
-            if stereotype == "rolemixin":
+            stereotype = decl.get("stereotype")
+
+            # ATENÇÃO: estereótipo vindo da AST costuma ser "roleMixin"
+            if stereotype == "roleMixin":
                 rolemixins[name] = decl
+
             elif stereotype == "role":
                 roles[name] = decl
-        elif decl_type == "GeneralizationSet":  # Ajustado para a AST do main.py
-            general_name = decl.get("general")
-            if general_name:
-                gensets_by_general[general_name].append(decl)
 
-    # 2. Validação do Padrão RoleMixin
-    for rolemixin_name, rolemixin_decl in rolemixins.items():
-        associated_gensets = gensets_by_general.get(rolemixin_name, [])
+            # mapear especializações (Super → [Subclasses])
+            for sup in decl.get("specializes", []):
+                specializes_map[sup].append(name)
 
-        for genset_decl in associated_gensets:
-            modifiers = genset_decl.get("modifiers", [])
-            is_disjoint = "disjoint" in modifiers
-            is_complete = "complete" in modifiers
-            genset_name = genset_decl.get("name", "N/A")
+        # GeneralizationSets
+        elif decl_type == "GeneralizationSet":
+            general = decl.get("general")
+            if general:
+                gensets_by_general[general].append(decl)
 
-            # Requisito Semântico: O Genset DEVE ser 'disjoint'
-            if not is_disjoint:
+    # ----------------------------------------------------------------------
+    # 2. VERIFICAÇÃO DO PADRÃO (LÓGICA ALTERADA)
+    # ----------------------------------------------------------------------
+    for rm_name, rm_decl in rolemixins.items():
+        lineno_rm = rm_decl.get("lineno", "N/A")
+
+        # Quais roles realmente especializam o RoleMixin?
+        specializing_roles = [
+            role_name
+            for role_name in specializes_map.get(rm_name, [])
+            if role_name in roles
+        ]
+
+        # Caso 1: RoleMixin não é especializado por nenhuma role → não há padrão
+        if len(specializing_roles) == 0:
+            continue  # Não gera erro, apenas não configura padrão
+
+        # Caso 2: RoleMixin especializado por roles → Genset obrigatório
+        associated_gensets = gensets_by_general.get(rm_name, [])
+        pattern_found_in_genset = False
+
+        # O Genset é obrigatório, mas se ele estiver ausente, devemos reportar o erro
+        if not associated_gensets:
+            errors.append(
+                {
+                    "type": "Incomplete Pattern (Mandatory Genset Missing)",
+                    "pattern": "RoleMixin Pattern",
+                    "message": (
+                        f"O RoleMixin '{rm_name}' é especializado por Roles "
+                        f"({', '.join(specializing_roles)}), mas NÃO possui "
+                        f"nenhum GeneralizationSet. O padrão exige um Genset "
+                        f"com modificador 'disjoint' cobrindo as Roles especializantes."
+                    ),
+                    "lineno": lineno_rm,
+                }
+            )
+            # Continua o loop do RoleMixin para o próximo, o erro já foi reportado
+            continue
+
+        # ------------------------------------------------------------------
+        # 3. Verificar cada Genset associado ao RoleMixin
+        # ------------------------------------------------------------------
+        for gs in associated_gensets:
+            gs_name = gs.get("name", "N/A")
+            gs_modifiers = gs.get("modifiers", [])
+            gs_specifics = set(gs.get("specifics", []))
+            gs_lineno = gs.get("lineno", "N/A")
+
+            is_valid_genset = True  # Flag para checar se este Genset é válido
+
+            # Regra: Genset DEVE ser 'disjoint'
+            if "disjoint" not in gs_modifiers:
                 errors.append(
                     {
-                        "type": "Semantic Error (Mandatory Constraint - Coerção)",  # Coerção: Exige Disjoint
+                        "type": "Semantic Error (Mandatory Constraint)",
                         "pattern": "RoleMixin Pattern",
-                        "message": f"ERRO POR COERÇÃO: O Genset '{genset_name}' que especializa o RoleMixin '{rolemixin_name}' DEVE ser declarado como 'disjoint'.",
-                        "lineno": genset_decl.get("lineno", "N/A"),
+                        "message": (
+                            f"O Genset '{gs_name}' associado ao RoleMixin '{rm_name}' "
+                            f"DEVE ser declarado como 'disjoint'."
+                        ),
+                        "lineno": gs_lineno,
                     }
                 )
-                continue
+                is_valid_genset = False
+                # Continua verificando outros Gensets (se houver), mas não marca este como válido.
 
-            genset_specifics_names = set(genset_decl.get("specifics", []))
-
-            # Requisito Estrutural: Deve ter pelo menos 2 Roles
-            if len(genset_specifics_names) < 2:
+            # Regra: Ao menos duas roles
+            if len(gs_specifics) < 2:
                 errors.append(
                     {
-                        "type": "Incomplete Pattern (Deduction Failure)",  # Incompleto
+                        "type": "Incomplete Pattern (Too Few Specifics)",
                         "pattern": "RoleMixin Pattern",
-                        "message": f"DEDUÇÃO DE PADRÃO INCOMPLETO: O Genset '{genset_name}' deve ter pelo menos duas classes 'role' como 'specifics'.",
-                        "lineno": genset_decl.get("lineno", "N/A"),
+                        "message": (
+                            f"O Genset '{gs_name}' associado ao RoleMixin '{rm_name}' "
+                            f"possui menos de duas classes em 'specifics'. "
+                            f"O padrão exige pelo menos duas roles."
+                        ),
+                        "lineno": gs_lineno,
                     }
                 )
-                continue
+                is_valid_genset = False
 
-            # Requisito de Tipagem: Todos os 'specifics' devem ser 'role's
-            specifics_are_roles = all(name in roles for name in genset_specifics_names)
-
-            if specifics_are_roles:
-                found.append(
-                    {
-                        "pattern": "RoleMixin Pattern",
-                        "rolemixin_name": rolemixin_name,
-                        "roles_grouped": list(genset_specifics_names),
-                        "genset_name": genset_name,
-                        "is_complete": is_complete,
-                        # CORREÇÃO: Usar .get() para evitar KeyError se lineno não estiver na AST
-                        "lineno": rolemixin_decl.get("lineno", "N/A"),
-                    }
-                )
-                break
-            else:
+            # Regra: Todos os specifics devem ser roles
+            non_role_specifics = [name for name in gs_specifics if name not in roles]
+            if non_role_specifics:
                 errors.append(
                     {
-                        "type": "Semantic Error (Type Coercion)",
+                        "type": "Semantic Error (Type Violation)",
                         "pattern": "RoleMixin Pattern",
-                        "message": f"ERRO POR COERÇÃO: O Genset '{genset_name}' lista classes em 'specifics' que não são do tipo 'role'.",
-                        "lineno": genset_decl.get("lineno", "N/A"),
+                        "message": (
+                            f"O Genset '{gs_name}' possui 'specifics' que não são Roles: "
+                            f"{', '.join(non_role_specifics)}. "
+                            f"O RoleMixin Pattern exige somente estereótipos 'role'."
+                        ),
+                        "lineno": gs_lineno,
                     }
                 )
+                is_valid_genset = False
+
+            # ------------------------------------------------------------------
+            # NOVO CHECK: Verificar se as Roles especializantes estão no Genset
+            # ------------------------------------------------------------------
+            if is_valid_genset:
+                missing_in_genset = set(specializing_roles) - gs_specifics
+
+                if missing_in_genset:
+                    errors.append(
+                        {
+                            "type": "Incomplete Pattern (Missing Specifics)",
+                            "pattern": "RoleMixin Pattern",
+                            "message": (
+                                "DEDUÇÃO DE PADRÃO INCOMPLETO: "
+                                f"O Genset '{gs_name}' não inclui todas as Roles especializantes. "
+                                f"Roles ausentes: {', '.join(missing_in_genset)}."
+                            ),
+                            "lineno": gs_lineno,
+                        }
+                    )
+
+                # Se o Genset é válido em termos de tipos e modificadores, considera-se o padrão encontrado
+                # mesmo se houver Roles faltando (para que o erro de dedução seja o único reportado, não a ausência total)
+                if not missing_in_genset:
+                    pattern_found_in_genset = True
+                    found.append(
+                        {
+                            "pattern": "RoleMixin Pattern",
+                            "rolemixin": rm_name,
+                            "roles_grouped": list(gs_specifics),
+                            "genset_name": gs_name,
+                            "lineno": lineno_rm,
+                            "is_disjoint": True,
+                        }
+                    )
+
+        # Se houver Gensets, mas nenhum deles satisfez as condições mínimas (disjoint e >= 2 roles),
+        # ou se o Genset válido falhou ao cobrir as roles, o erro de Genset Missing não é reportado.
+        # Mas garantimos que o erro de Missing Specifics ou Constraint Violation seja reportado.
 
     return found, errors
 
@@ -634,11 +738,17 @@ def format_unified_output(found_patterns: List[Dict], validation_errors: List[Di
     output_found = []
     for p in found_patterns:
         # Tenta extrair a Kind (ou RoleMixin/Mode/Relator) e os specifics (Subkinds/Roles/Phases)
-        general_name = p.get("kind", p.get("rolemixin_name"))
+        general_name = p.get("kind") or p.get("rolemixin") or p.get("rolemixin_name")
+
         specifics_list = p.get("subkinds") or p.get("roles_grouped") or p.get("phases")
 
         details = ""
-        if general_name and specifics_list:
+        if p["pattern"] == "RoleMixin Pattern":
+            details = (
+                f"RoleMixin: {general_name} -> Roles: " f"{', '.join(specifics_list)}"
+            )
+
+        elif general_name and specifics_list:
             details = f"Kind: {general_name} -> Specifics: {', '.join(specifics_list)}"
         elif p["pattern"] == "Relator Pattern":
             details = f"Roles mediadas: {p['role1']} e {p['role2']}. Relator: {p['relator_name']}"
