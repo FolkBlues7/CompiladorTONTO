@@ -1,396 +1,619 @@
+"""
+Semantic analysis for TONTO (Textual Ontology Language).
+
+Este módulo implementa a ANÁLISE SEMÂNTICA da linguagem TONTO,
+focada na identificação e validação de Ontology Design Patterns (ODPs).
+
+Pipeline Semântico
+------------------
+1. build_symbol_table(ast)
+   Constrói uma visão unificada do modelo (symbol table), centralizando:
+     - classes por estereótipo (kind, role, phase, mode, relator, roleMixin, ...)
+     - mapa global de classes
+     - conjuntos de generalização (GeneralizationSet)
+     - mapa de especializações (super → subclasses)
+
+2. util functions
+   Conjunto de funções auxiliares defensivas:
+     - extração segura de lineno
+     - normalização de listas
+     - helpers de fallback semântico
+
+3. pattern checkers
+   Cada padrão ontológico é validado por um checker independente,
+   todos seguindo a assinatura comum:
+
+       checker(ast, table) -> (found_patterns, validation_errors)
+
+   Checkers disponíveis:
+     - Subkind Pattern
+     - Role Pattern
+     - Phase Pattern
+     - Relator Pattern
+     - Mode Pattern
+     - RoleMixin Pattern
+
+4. run_semantic_checks(ast)
+   Orquestra todos os checkers utilizando a symbol table compartilhada.
+
+5. format_unified_output(found, errors)
+   Produz um relatório unificado com:
+     (1) padrões completos encontrados
+     (2) erros por coerção (violações semânticas)
+     (3) deduções incompletas / sobrecarga de regras
+
+Observação Importante
+---------------------
+Todos os checkers utilizam a mesma symbol table para garantir:
+  - consistência semântica global
+  - ausência de diagnósticos contraditórios
+  - facilidade de manutenção e extensão
+"""
+
+# ==============================================================================
+# Imports
+# ==============================================================================
 import json
-from collections import defaultdict
-from typing import List, Dict, Tuple, Any
 import itertools
+from typing import List, Dict, Tuple, Any
+from collections import defaultdict
+
+
+# ==============================================================================
+# Utilitários Semânticos
+# ==============================================================================
+def safe_lineno(node: Dict[str, Any], fallback: int = None) -> Any:
+    """
+    Retorna node['lineno'] se existir.
+    Caso contrário, retorna fallback.
+    Mantém None se nenhum valor estiver disponível.
+    """
+    if isinstance(node, dict):
+        return node.get("lineno", fallback)
+    return fallback
+
+
+def ensure_list(x):
+    """
+    Normaliza valores possivelmente nulos ou escalares em lista.
+    """
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    return [x]
+
+
+# ==============================================================================
+# Symbol Table Builder
+# ==============================================================================
+def build_symbol_table(ast: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Constrói uma symbol table central a partir da AST.
+
+    Estrutura da tabela:
+      - classes_by_stereotype: { stereo -> { name -> decl } }
+      - classes: { name -> decl }
+      - gensets: [ GeneralizationSet decls ]
+      - specializes_map: { super -> [subclasses] }
+
+    Esta tabela é compartilhada por TODOS os checkers,
+    garantindo consistência global.
+    """
+    table = {
+        "classes_by_stereotype": defaultdict(dict),
+        "classes": {},
+        "gensets": [],
+        "specializes_map": defaultdict(list),
+    }
+
+    for decl in ast.get("declarations", []):
+        dtype = decl.get("type")
+
+        if dtype == "ClassDeclaration":
+            name = decl.get("name")
+            stereo = decl.get("stereotype")
+
+            if name:
+                table["classes"][name] = decl
+
+                if stereo:
+                    table["classes_by_stereotype"][stereo][name] = decl
+
+                # Super → Sub
+                for sup in ensure_list(decl.get("specializes")):
+                    table["specializes_map"][sup].append(name)
+
+        elif dtype == "GeneralizationSet":
+            table["gensets"].append(decl)
+
+        # Relações são tratadas localmente nos checkers
+
+    return table
 
 
 # ==============================================================================
 # 1. SUBKIND PATTERN (Kind -> Subkind(s) + Genset Disjoint)
 # ==============================================================================
-def check_subkind_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
+def check_subkind_pattern(
+    ast: Dict[str, Any], table: Dict[str, Any]
+) -> Tuple[List[Dict], List[Dict]]:
     """
-    Verifica instâncias do Subkind pattern.
-    Regra Semântica Principal: O Genset DEVE ser 'disjoint'.
+    Verifica instâncias do Subkind Pattern.
+
+    Regras OntoUML:
+    --------------
+    - Uma Kind deve ser especializada por pelo menos dois Subkinds
+    - Deve existir um GeneralizationSet associado (general = Kind)
+    - O Genset DEVE ser 'disjoint'
+    - Os specifics do Genset DEVEM ser apenas Subkinds
+    - lineno do padrão = lineno do Genset (fallback para Kind)
     """
     errors = []
     found = []
 
+    # ------------------------------------------------------------------
+    # 1. Coleta de informações da AST
+    # ------------------------------------------------------------------
     kinds = {}
-    subkinds_by_general = defaultdict(list)
+    subkinds = {}
+    specializes_map = defaultdict(list)
     gensets_by_general = defaultdict(list)
 
-    # 1. Coleta de Declarações (Classes e Gensets)
     for decl in ast.get("declarations", []):
         decl_type = decl.get("type")
+
         if decl_type == "ClassDeclaration":
-            stereotype = decl.get("stereotype")
             name = decl.get("name")
+            stereotype = decl.get("stereotype")
+
             if stereotype == "kind":
                 kinds[name] = decl
-            elif stereotype == "subkind":
-                for super_type in decl.get("specializes", []):
-                    subkinds_by_general[super_type].append(decl)
-        elif decl_type == "GeneralizationSet":  # Ajustado para a AST do main.py
-            general_name = decl.get("general")
-            if general_name:
-                gensets_by_general[general_name].append(decl)
 
-    # 2. Validação do Padrão Subkind
+            elif stereotype == "subkind":
+                subkinds[name] = decl
+
+            # mapear especializações (Super → [Subclasses])
+            for super_type in decl.get("specializes", []):
+                specializes_map[super_type].append(name)
+
+        elif decl_type == "GeneralizationSet":
+            general = decl.get("general")
+            if general:
+                gensets_by_general[general].append(decl)
+
+    all_subkind_names = set(subkinds.keys())
+
+    # ------------------------------------------------------------------
+    # 2. Validação do Subkind Pattern
+    # ------------------------------------------------------------------
     for kind_name, kind_decl in kinds.items():
-        subkinds = subkinds_by_general.get(kind_name, [])
-        if len(subkinds) < 2:
-            continue
+        # Subkinds reais que especializam esta Kind
+        actual_subkinds = [
+            subkinds[name]
+            for name in specializes_map.get(kind_name, [])
+            if name in all_subkind_names
+        ]
+
+        if len(actual_subkinds) < 2:
+            continue  # não configura Subkind Pattern
 
         associated_gensets = gensets_by_general.get(kind_name, [])
 
         for genset_decl in associated_gensets:
-            modifiers = genset_decl.get("modifiers", [])
-            is_disjoint = "disjoint" in modifiers
-            is_complete = "complete" in modifiers
             genset_name = genset_decl.get("name", "N/A")
+            modifiers = set(genset_decl.get("modifiers", []))
+            specifics = set(genset_decl.get("specifics", []))
 
-            # Requisito Semântico: O Genset DEVE ser 'disjoint' para Subkinds
-            if not is_disjoint:
+            lineno_pattern = genset_decl.get("lineno", kind_decl.get("lineno"))
+
+            # ------------------------------------------------------------------
+            # FILTRO FUNDAMENTAL:
+            # Genset só pode ser de Subkind se TODOS os specifics forem Subkinds
+            # ------------------------------------------------------------------
+            if not specifics.issubset(all_subkind_names):
+                continue  # evita falso positivo (Phase, Role etc.)
+
+            # Regra semântica obrigatória: disjoint
+            if "disjoint" not in modifiers:
                 errors.append(
                     {
                         "type": "Semantic Error (Mandatory Constraint - Coerção)",
                         "pattern": "Subkind Pattern",
-                        "message": f"ERRO POR COERÇÃO: O Genset '{genset_name}' que especializa a Kind '{kind_name}' com Subkinds DEVE ser declarado como 'disjoint'.",
-                        "lineno": genset_decl.get("lineno", "N/A"),
-                    }
-                )
-                continue  # Não é um padrão Subkind válido
-
-            genset_specifics_names = set(genset_decl.get("specifics", []))
-
-            if len(genset_specifics_names) >= 2:
-                # Checa se todos os subkinds que especializam essa Kind estão no Genset
-                actual_subkinds_names = set(
-                    s["name"]
-                    for s in subkinds
-                    if s.get("specializes", [kind_name])[0] == kind_name
-                )
-
-                if actual_subkinds_names.issubset(genset_specifics_names):
-                    found.append(
-                        {
-                            "pattern": "Subkind Pattern",
-                            "kind": kind_name,
-                            "subkinds": list(actual_subkinds_names),
-                            "genset_name": genset_name,
-                            "is_complete": is_complete,
-                            # CORREÇÃO: Usar .get() para evitar KeyError se lineno não estiver na AST
-                            "lineno": kind_decl.get("lineno", "N/A"),
-                        }
-                    )
-                    break
-
-    return found, errors
-
-
-# ==============================================================================
-# 2. ROLE PATTERN (Kind -> Role(s) + Genset Non-Disjoint)
-# ==============================================================================
-def check_role_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Verifica instâncias do Role Pattern.
-    Regra Semântica Principal: O Genset NÃO DEVE ser 'disjoint'.
-    """
-    errors = []
-    found = []
-
-    kinds = {}
-    roles_by_general = defaultdict(list)
-    gensets_by_general = defaultdict(list)
-
-    # 1. Coleta de Declarações
-    for decl in ast.get("declarations", []):
-        decl_type = decl.get("type")
-        if decl_type == "ClassDeclaration":
-            stereotype = decl.get("stereotype")
-            name = decl.get("name")
-            if stereotype == "kind":
-                kinds[name] = decl
-            elif stereotype == "role":
-                for super_type in decl.get("specializes", []):
-                    roles_by_general[super_type].append(decl)
-        elif decl_type == "GeneralizationSet":  # Ajustado para a AST do main.py
-            general_name = decl.get("general")
-            if general_name:
-                gensets_by_general[general_name].append(decl)
-
-    # 2. Validação do Padrão Role
-    for kind_name, kind_decl in kinds.items():
-        roles = roles_by_general.get(kind_name, [])
-        if len(roles) < 2:
-            continue
-
-        associated_gensets = gensets_by_general.get(kind_name, [])
-
-        for genset_decl in associated_gensets:
-            modifiers = genset_decl.get("modifiers", [])
-            is_disjoint = "disjoint" in modifiers
-            is_complete = "complete" in modifiers
-            genset_name = genset_decl.get("name", "N/A")
-
-            # Requisito Semântico: O Genset NÃO DEVE ser 'disjoint' para Roles
-            if is_disjoint:
-                errors.append(
-                    {
-                        "type": "Semantic Error (Coercion Conflict)",  # Coerção: Role exige Non-Disjoint
-                        "pattern": "Role Pattern",
-                        "message": f"ERRO POR COERÇÃO: O Genset '{genset_name}' que especializa a Kind '{kind_name}' com Roles não deve ser declarado como 'disjoint' (conflito de coerção).",
-                        "lineno": genset_decl.get("lineno", "N/A"),
-                    }
-                )
-
-            genset_specifics_names = set(genset_decl.get("specifics", []))
-
-            if len(genset_specifics_names) >= 2:
-                actual_roles_names = set(
-                    r["name"]
-                    for r in roles
-                    if r.get("specializes", [kind_name])[0] == kind_name
-                )
-
-                if actual_roles_names.issubset(genset_specifics_names):
-                    found.append(
-                        {
-                            "pattern": "Role Pattern",
-                            "kind": kind_name,
-                            "roles": list(actual_roles_names),
-                            "genset_name": genset_name,
-                            "is_complete": is_complete,
-                            # CORREÇÃO: Usar .get() para evitar KeyError se lineno não estiver na AST
-                            "lineno": kind_decl.get("lineno", "N/A"),
-                        }
-                    )
-                    break
-
-    return found, errors
-
-
-# ==============================================================================
-# 3. PHASE PATTERN (Kind -> Phase(s) + Genset Disjoint OBRIGATÓRIO)
-# ==============================================================================
-def check_phase_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Verifica instâncias do Phase Pattern.
-    Regra Semântica Principal: O Genset DEVE ser 'disjoint'.
-    """
-    errors = []
-    found = []
-
-    kinds = {}
-    phases_by_general = defaultdict(list)
-    gensets_by_general = defaultdict(list)
-
-    # 1. Coleta de Declarações
-    for decl in ast.get("declarations", []):
-        decl_type = decl.get("type")
-        if decl_type == "ClassDeclaration":
-            stereotype = decl.get("stereotype")
-            name = decl.get("name")
-            if stereotype == "kind":
-                kinds[name] = decl
-            elif stereotype == "phase":
-                for super_type in decl.get("specializes", []):
-                    phases_by_general[super_type].append(decl)
-        elif decl_type == "GeneralizationSet":  # Ajustado para a AST do main.py
-            general_name = decl.get("general")
-            if general_name:
-                gensets_by_general[general_name].append(decl)
-
-    # 2. Validação do Padrão Phase
-    for kind_name, kind_decl in kinds.items():
-        phases = phases_by_general.get(kind_name, [])
-        if len(phases) < 2:
-            continue
-
-        associated_gensets = gensets_by_general.get(kind_name, [])
-
-        for genset_decl in associated_gensets:
-            modifiers = genset_decl.get("modifiers", [])
-            is_disjoint = "disjoint" in modifiers
-            is_complete = "complete" in modifiers
-            genset_name = genset_decl.get("name", "N/A")
-
-            # Requisito Semântico: O Genset DEVE ser 'disjoint'
-            if not is_disjoint:
-                errors.append(
-                    {
-                        "type": "Semantic Error (Mandatory Constraint - Coerção)",  # Coerção: Exige Disjoint
-                        "pattern": "Phase Pattern",
-                        "message": f"ERRO POR COERÇÃO: O Genset '{genset_name}' que especializa a Kind '{kind_name}' com Phases DEVE ser declarado como 'disjoint'.",
-                        "lineno": genset_decl.get("lineno", "N/A"),
+                        "message": (
+                            f"O Genset '{genset_name}' que especializa a Kind "
+                            f"'{kind_name}' com Subkinds DEVE ser declarado como 'disjoint'."
+                        ),
+                        "lineno": lineno_pattern,
                     }
                 )
                 continue
 
-            genset_specifics_names = set(genset_decl.get("specifics", []))
+            # Verifica cobertura real
+            actual_subkind_names = {sk["name"] for sk in actual_subkinds}
 
-            if len(genset_specifics_names) >= 2:
-                actual_phases_names = set(
-                    p["name"]
-                    for p in phases
-                    if p.get("specializes", [kind_name])[0] == kind_name
+            if actual_subkind_names.issubset(specifics):
+                found.append(
+                    {
+                        "pattern": "Subkind Pattern",
+                        "kind": kind_name,
+                        "subkinds": sorted(list(actual_subkind_names)),
+                        "genset_name": genset_name,
+                        "is_complete": "complete" in modifiers,
+                        "lineno": lineno_pattern,
+                    }
                 )
-
-                if actual_phases_names.issubset(genset_specifics_names):
-                    found.append(
-                        {
-                            "pattern": "Phase Pattern",
-                            "kind": kind_name,
-                            "phases": list(actual_phases_names),
-                            "is_disjoint": is_disjoint,
-                            "is_complete": is_complete,
-                            # CORREÇÃO: Usar .get() para evitar KeyError se lineno não estiver na AST
-                            "lineno": kind_decl.get("lineno", "N/A"),
-                        }
-                    )
-                    break
+                break  # um Subkind Pattern por Kind é suficiente
 
     return found, errors
 
 
 # ==============================================================================
-# 4. RELATOR PATTERN (Kind(s) + Role(s) + Relator @mediation + @material relation)
+# 2. ROLE PATTERN (Kind -> Role(s) + Genset NÃO disjoint)
 # ==============================================================================
-def check_relator_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
+def check_role_pattern(
+    ast: Dict[str, Any], table: Dict[str, Any]
+) -> Tuple[List[Dict], List[Dict]]:
     """
-    Verifica instâncias do Relator Pattern.
+    Role Pattern (OntoUML):
+
+    Regras:
+    -------
+    - Uma Kind deve ser especializada por pelo menos dois Roles
+    - Deve existir um GeneralizationSet associado (general = Kind)
+    - O Genset NÃO DEVE ser 'disjoint' (coerção se estiver)
+    - O Genset deve conter SOMENTE Roles (filtro ontológico obrigatório)
+    - lineno do padrão = genset.lineno (fallback para kind)
+    """
+    errors: List[Dict] = []
+    found: List[Dict] = []
+
+    # ------------------------------------------------------------------
+    # 1. Coleta via symbol table
+    # ------------------------------------------------------------------
+    kinds = table.get("classes_by_stereotype", {}).get("kind", {})
+    roles = table.get("classes_by_stereotype", {}).get("role", {})
+    gensets = table.get("gensets", [])
+    specializes_map = table.get("specializes_map", {})
+
+    all_role_names = set(roles.keys())
+
+    # ------------------------------------------------------------------
+    # 2. Validação do Role Pattern
+    # ------------------------------------------------------------------
+    for kind_name, kind_decl in kinds.items():
+        # Roles reais que especializam esta Kind
+        role_names = [
+            n for n in specializes_map.get(kind_name, []) if n in all_role_names
+        ]
+        if len(role_names) < 2:
+            continue  # não configura Role Pattern
+
+        related_gs = [g for g in gensets if g.get("general") == kind_name]
+
+        for gs in related_gs:
+            gs_name = gs.get("name", "N/A")
+            gs_mod = set(ensure_list(gs.get("modifiers")))
+            gs_specs = set(ensure_list(gs.get("specifics")))
+
+            # FILTRO CRÍTICO: considere apenas gensets compostos exclusivamente por roles
+            if not gs_specs:
+                continue
+            if not gs_specs.issubset(all_role_names):
+                continue  # ignora GS de Phase/Subkind/etc.
+
+            # lineno do padrão = lineno do genset (fallback para kind)
+            lineno_pattern = safe_lineno(gs, safe_lineno(kind_decl))
+
+            # coerção: GS NÃO deve ser disjoint para Role Pattern
+            if "disjoint" in gs_mod:
+                errors.append(
+                    {
+                        "type": "Semantic Error (Coercion Conflict)",
+                        "pattern": "Role Pattern",
+                        "message": (
+                            f"ERRO POR COERÇÃO: O Genset '{gs_name}' que especializa a Kind '{kind_name}' "
+                            f"com Roles não deve ser declarado como 'disjoint'."
+                        ),
+                        "lineno": lineno_pattern,
+                    }
+                )
+
+            # se GS cobre as roles reais -> pattern detectado
+            if len(gs_specs) >= 2:
+                actual_roles = set(role_names)
+                if actual_roles and actual_roles.issubset(gs_specs):
+                    found.append(
+                        {
+                            "pattern": "Role Pattern",
+                            "kind": kind_name,
+                            "roles": sorted(list(actual_roles)),
+                            "genset_name": gs_name,
+                            "is_complete": ("complete" in gs_mod),
+                            "lineno": lineno_pattern,
+                        }
+                    )
+                    break  # um Role Pattern por Kind é suficiente
+
+    return found, errors
+
+
+# ==============================================================================
+# 3. PHASE PATTERN (Kind -> Phase(s) + Genset DISJOINT obrigatório)
+# ==============================================================================
+def check_phase_pattern(
+    ast: Dict[str, Any], table: Dict[str, Any]
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Phase Pattern (OntoUML):
+
+    Regras:
+    -------
+    - Uma Kind deve ser especializada por pelo menos duas Phases
+    - Deve existir um GeneralizationSet associado (general = Kind)
+    - O Genset DEVE ser 'disjoint' (coerção se não)
+    - O Genset deve conter SOMENTE Phases (filtro ontológico)
+    - lineno do padrão = genset.lineno (fallback para kind)
     """
     errors = []
     found = []
 
+    # ------------------------------------------------------------------
+    # 1. Coleta de informações da AST
+    # ------------------------------------------------------------------
     kinds = {}
-    roles_by_general = defaultdict(list)
+    phases = {}
+    specializes_map = defaultdict(list)
+    gensets_by_general = defaultdict(list)
+
+    for decl in ast.get("declarations", []):
+        decl_type = decl.get("type")
+
+        if decl_type == "ClassDeclaration":
+            name = decl.get("name")
+            stereotype = decl.get("stereotype")
+
+            if stereotype == "kind":
+                kinds[name] = decl
+
+            elif stereotype == "phase":
+                phases[name] = decl
+
+            for super_type in decl.get("specializes", []):
+                specializes_map[super_type].append(name)
+
+        elif decl_type == "GeneralizationSet":
+            general = decl.get("general")
+            if general:
+                gensets_by_general[general].append(decl)
+
+    all_phase_names = set(phases.keys())
+
+    # ------------------------------------------------------------------
+    # 2. Validação do Phase Pattern
+    # ------------------------------------------------------------------
+    for kind_name, kind_decl in kinds.items():
+        # Phases reais que especializam esta Kind
+        actual_phases = [
+            phases[name]
+            for name in specializes_map.get(kind_name, [])
+            if name in all_phase_names
+        ]
+
+        if len(actual_phases) < 2:
+            continue  # não configura Phase Pattern
+
+        associated_gensets = gensets_by_general.get(kind_name, [])
+
+        for genset_decl in associated_gensets:
+            genset_name = genset_decl.get("name", "N/A")
+            modifiers = set(genset_decl.get("modifiers", []))
+            specifics = set(genset_decl.get("specifics", []))
+
+            lineno_pattern = genset_decl.get("lineno", kind_decl.get("lineno"))
+
+            # --------------------------------------------------------------
+            # FILTRO FUNDAMENTAL:
+            # Genset só pode ser de Phase se TODOS os specifics forem Phases
+            # --------------------------------------------------------------
+            if not specifics.issubset(all_phase_names):
+                continue  # ignora GS de Role/Subkind/etc.
+
+            # Regra semântica obrigatória: Phase Pattern exige disjoint
+            if "disjoint" not in modifiers:
+                errors.append(
+                    {
+                        "type": "Semantic Error (Mandatory Constraint - Coerção)",
+                        "pattern": "Phase Pattern",
+                        "message": (
+                            f"O Genset '{genset_name}' que especializa a Kind "
+                            f"'{kind_name}' com Phases DEVE ser declarado como 'disjoint'."
+                        ),
+                        "lineno": lineno_pattern,
+                    }
+                )
+                continue
+
+            actual_phase_names = {p["name"] for p in actual_phases}
+
+            if len(specifics) >= 2 and actual_phase_names.issubset(specifics):
+                found.append(
+                    {
+                        "pattern": "Phase Pattern",
+                        "kind": kind_name,
+                        "phases": sorted(list(actual_phase_names)),
+                        "is_disjoint": True,
+                        "is_complete": ("complete" in modifiers),
+                        "lineno": lineno_pattern,
+                    }
+                )
+                break  # um Phase Pattern por Kind é suficiente
+
+    return found, errors
+
+
+# ==============================================================================
+# 4. RELATOR PATTERN (Role(s) + Relator @mediation + @material)
+# ==============================================================================
+def check_relator_pattern(
+    ast: Dict[str, Any], table: Dict[str, Any]
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Relator Pattern (OntoUML):
+
+    Regras:
+    -------
+    - Pelo menos dois Roles que especializam Kinds distintas
+    - Um Relator que possua >= 2 relações @mediation para essas Roles
+    - Uma relação @material externa conectando exatamente as duas Roles
+    - lineno do padrão: relator > material > role
+    """
+    errors = []
+    found = []
+
+    # ------------------------------------------------------------------
+    # 1. Coleta de declarações
+    # ------------------------------------------------------------------
+    roles = {}
     relators = {}
+    mediated_entities = {}  # role | kind | subkind
+    specializes_map = defaultdict(list)
     material_relations = []
 
-    # 1. Coleta de Declarações
     for decl in ast.get("declarations", []):
         decl_type = decl.get("type")
         name = decl.get("name")
 
+        # ------------------- Classes -------------------
         if decl_type == "ClassDeclaration":
             stereotype = decl.get("stereotype")
-            if stereotype == "kind":
-                kinds[name] = decl
-            elif stereotype == "role":
-                for super_type in decl.get("specializes", []):
-                    roles_by_general[super_type].append(decl)
+
+            if stereotype == "role":
+                roles[name] = decl
+                mediated_entities[name] = decl
+
+            elif stereotype in {"kind", "subkind"}:
+                mediated_entities[name] = decl
+
             elif stereotype == "relator":
                 relators[name] = decl
 
-        elif decl_type == "RelationDeclaration":
-            # Relações Materiais (externas, declaradas fora das classes)
+            for sup in decl.get("specializes", []):
+                specializes_map[sup].append(name)
+
+        # ------------------- Relações externas -------------------
+        elif decl_type in {"RelationDeclaration", "InlineRelation"}:
             if (
                 decl.get("stereotype") == "material"
                 or decl.get("relation_type") == "material"
             ):
                 material_relations.append(decl)
-            # Relator declarado como RelationDeclaration (modelo alternativo)
-            elif decl.get("stereotype") == "relator":
-                relators[name] = decl
-        elif decl_type == "InlineRelation":
-            # Relações Materiais (inline, declaradas fora das classes)
-            if decl.get("stereotype") == "material":
-                material_relations.append(decl)
 
-    # 2. Identifica pares de Roles que especializam Kinds distintas
+    # Apenas roles com exatamente 1 supertype (simplificação ontológica comum)
     valid_roles = {
-        role["name"]: role
-        for sublist in roles_by_general.values()
-        for role in sublist
-        if len(role.get("specializes", [])) == 1
+        name: r for name, r in roles.items() if len(r.get("specializes", [])) == 1
     }
+
+    # ------------------------------------------------------------------
+    # 2. Geração de pares válidos de Roles
+    # ------------------------------------------------------------------
     role_pairs = list(itertools.combinations(valid_roles.keys(), 2))
 
-    for role_name1, role_name2 in role_pairs:
-        role1 = valid_roles[role_name1]
-        role2 = valid_roles[role_name2]
+    for r1_name, r2_name in role_pairs:
+        r1 = valid_roles[r1_name]
+        r2 = valid_roles[r2_name]
 
-        kind1 = role1.get("specializes", [None])[0]
-        kind2 = role2.get("specializes", [None])[0]
+        kind1 = r1.get("specializes", [None])[0]
+        kind2 = r2.get("specializes", [None])[0]
 
-        # O padrão exige que as Roles especializem Kinds distintas
+        # Regra: roles devem especializar Kinds distintas
         if not kind1 or not kind2 or kind1 == kind2:
             continue
 
-        # 3. Validar o Relator de Mediação (Pelo menos 2 mediações para as Roles)
+        # ------------------------------------------------------------------
+        # 3. Busca por Relator com mediação para ambas as Roles
+        # ------------------------------------------------------------------
         found_relator = None
-        for relator_name, relator_decl in relators.items():
-            # Acessa relações internas (dentro do 'body' do Relator)
-            terminations = relator_decl.get("body", {}).get("relations", [])
 
-            # Tentativa alternativa para Classes (relatores) que podem ter membros
-            if not terminations and relator_decl.get("body", {}).get("members"):
-                terminations = relator_decl["body"]["members"]
+        for relator_decl in relators.values():
+            body = relator_decl.get("body", {})
+            terminations = body.get("relations") or body.get("members") or []
 
-            mediation_count = 0
+            mediated = set()
+            for t in terminations:
+                if t.get("stereotype") == "mediation":
+                    target = t.get("target") or t.get("target_class")
+                    if target in mediated_entities:
+                        mediated.add(target)
 
-            for term in terminations:
-                # O AST do parser deve ter o campo 'stereotype' e 'target' (ou 'target_class')
-                target_cls = term.get("target") or term.get("target_class")
-                if term.get("stereotype") == "mediation" and target_cls in [
-                    role_name1,
-                    role_name2,
-                ]:
-                    mediation_count += 1
-
-            if mediation_count >= 2:
+            if {r1_name, r2_name}.issubset(mediated):
                 found_relator = relator_decl
                 break
 
-        # 4. Validar a Relação Material Externa
-        found_material_relation = None
-        for mat_rel_decl in material_relations:
-            # Verifica se os alvos da relação material correspondem aos pares de Roles
-            target1 = mat_rel_decl.get("source_class") or mat_rel_decl.get("target1")
-            target2 = mat_rel_decl.get("target_class") or mat_rel_decl.get("target2")
+        # ------------------------------------------------------------------
+        # 4. Busca por relação @material externa conectando as Roles
+        # ------------------------------------------------------------------
+        found_material = None
 
-            if (target1 == role_name1 and target2 == role_name2) or (
-                target1 == role_name2 and target2 == role_name1
-            ):
+        for mat in material_relations:
+            t1 = (
+                mat.get("source_class")
+                or mat.get("target1")
+                or mat.get("target_a")
+                or mat.get("end1")
+            )
+            t2 = (
+                mat.get("target_class")
+                or mat.get("target2")
+                or mat.get("target_b")
+                or mat.get("end2")
+            )
 
-                # A verificação do estereótipo já foi feita na coleta (material)
-                found_material_relation = mat_rel_decl
+            if {t1, t2} == {r1_name, r2_name}:
+                found_material = mat
                 break
 
-        if found_relator and found_material_relation:
+        # ------------------------------------------------------------------
+        # 5. Classificação: completo ou incompleto
+        # ------------------------------------------------------------------
+        if found_relator and found_material:
+            lineno_pattern = (
+                found_relator.get("lineno")
+                or found_material.get("lineno")
+                or r1.get("lineno")
+            )
+
             found.append(
                 {
                     "pattern": "Relator Pattern",
-                    "relator_name": found_relator["name"],
-                    "role1": role_name1,
-                    "role2": role_name2,
-                    "material_relation": found_material_relation.get(
-                        "relation_name", "N/A"
+                    "relator_name": found_relator.get("name"),
+                    "roles": [r1_name, r2_name],
+                    "material_relation": found_material.get(
+                        "relation_name", found_material.get("name", "N/A")
                     ),
-                    "lineno": found_relator.get("lineno", "N/A"),
+                    "lineno": lineno_pattern,
                 }
             )
-        elif found_relator or found_material_relation:
-            # Dedução de Padrão Incompleto (Sobrecarga)
-            missing_part = []
-            if not found_relator:
-                missing_part.append("Relator com mediação")
-            if not found_material_relation:
-                missing_part.append("relação @material externa")
 
-            if missing_part:
-                errors.append(
-                    {
-                        "type": "Incomplete Pattern (Deduction Failure)",  # Incompleto
-                        "pattern": "Relator Pattern",
-                        "message": f"DEDUÇÃO DE PADRÃO INCOMPLETO: Foi detectada parte da estrutura do Relator Pattern (Roles '{role_name1}' e '{role_name2}'), mas está faltando: {', '.join(missing_part)}.",
-                        # CORREÇÃO: Usar .get() para evitar KeyError se lineno não estiver na AST
-                        "lineno": role1.get(
-                            "lineno", "N/A"
-                        ),  # Linha da primeira Role como referência
-                    }
-                )
+        elif found_relator or found_material:
+            missing = []
+            if not found_relator:
+                missing.append("Relator com mediação")
+            if not found_material:
+                missing.append("relação @material externa")
+
+            errors.append(
+                {
+                    "type": "Incomplete Pattern (Deduction Failure)",
+                    "pattern": "Relator Pattern",
+                    "message": (
+                        f"DEDUÇÃO DE PADRÃO INCOMPLETO: Detecção parcial envolvendo "
+                        f"Roles '{r1_name}' e '{r2_name}'. "
+                        f"Faltando: {', '.join(missing)}."
+                    ),
+                    "lineno": r1.get("lineno"),
+                }
+            )
 
     return found, errors
 
@@ -398,105 +621,175 @@ def check_relator_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
 # ==============================================================================
 # 5. MODE PATTERN (Mode -> @characterization + @externalDependence)
 # ==============================================================================
-def check_mode_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
+def check_mode_pattern(
+    ast: Dict[str, Any], table: Dict[str, Any]
+) -> Tuple[List[Dict], List[Dict]]:
     """
     Verifica instâncias do Mode Pattern.
+
+    Regras:
+      - Cada Mode deve ter relações internas @characterization e @externalDependence
+      - Os alvos dessas relações devem ser Kinds declaradas
+      - lineno retornado: prioridade -> mode.lineno, kind_char.lineno, kind_ext.lineno, 1 (fallback)
+    Retorna: (found_patterns, errors)
     """
-    errors = []
-    found = []
+    errors: List[Dict] = []
+    found: List[Dict] = []
 
-    kinds = {}
-    modes = {}
+    # --- Helpers locais (usa versões globais se existirem) ---
+    def _ensure_list(v):
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return v
+        return [v]
 
-    # 1. Coleta de Declarações (Kinds e Modes)
-    for decl in ast.get("declarations", []):
-        decl_type = decl.get("type")
-        if decl_type == "ClassDeclaration":
-            stereotype = decl.get("stereotype")
-            name = decl.get("name")
-            if stereotype == "kind":
-                kinds[name] = decl
-            elif stereotype == "mode":
-                modes[name] = decl
+    def _safe_lineno_of(decl):
+        # tenta usar função global safe_lineno se disponível
+        try:
+            return globals().get(
+                "safe_lineno",
+                lambda d, fallback=1: (
+                    int(d.get("lineno"))
+                    if d and isinstance(d.get("lineno"), int) and d.get("lineno") > 0
+                    else fallback
+                ),
+            )(decl, 1)
+        except Exception:
+            ln = decl.get("lineno") if isinstance(decl, dict) else None
+            return ln if isinstance(ln, int) and ln > 0 else 1
 
-    # 2. Validação do Padrão Mode
-    for mode_name, mode_decl in modes.items():
+    # --- Fonte de informações: usa 'table' (se fornecida) para acelerar buscas ---
+    if table:
+        kinds_map = table.get("classes_by_stereotype", {}).get("kind", {})
+        modes_map = table.get("classes_by_stereotype", {}).get("mode", {})
+    else:
+        # fallback: varre AST
+        kinds_map = {}
+        modes_map = {}
+        for decl in ast.get("declarations", []):
+            if decl.get("type") == "ClassDeclaration":
+                st = decl.get("stereotype")
+                name = decl.get("name")
+                if st == "kind":
+                    kinds_map[name] = decl
+                elif st == "mode":
+                    modes_map[name] = decl
 
-        # --- CORREÇÃO DE ERRO AQUI ---
-        # 1. Acessa o 'body' de forma mais defensiva, aceitando None/null
-        mode_body = mode_decl.get("body")
+    # if table provided but modes_map empty, also fallback to AST scan (defensive)
+    if not modes_map:
+        for decl in ast.get("declarations", []):
+            if (
+                decl.get("type") == "ClassDeclaration"
+                and decl.get("stereotype") == "mode"
+            ):
+                modes_map[decl.get("name")] = decl
 
-        # 2. Verifica se o body é um dicionário antes de tentar acessar chaves aninhadas
-        if not isinstance(mode_body, dict):
-            # Se o corpo for None, malformado, ou ausente, não há relações internas.
+    # --- Checagem por cada mode ---
+    for mode_name, mode_decl in list(modes_map.items()):
+        # defensive access to body
+        body = mode_decl.get("body")
+        if not isinstance(body, dict):
             body_relations = []
         else:
-            # Se o corpo existe e é um dicionário, tenta buscar as relações
-            body_relations = mode_body.get("relations", mode_body.get("members", []))
-        # --- FIM DA CORREÇÃO ---
-
-        char_relation = None
-        ext_dep_relation = None
-
-        for rel in body_relations:
-            stereotype = rel.get("stereotype")
-            if stereotype == "characterization":
-                char_relation = rel
-            elif stereotype == "externalDependence":
-                ext_dep_relation = rel
-
-        if char_relation and ext_dep_relation:
-            target_char = char_relation.get("target") or char_relation.get(
-                "target_class"
-            )
-            target_ext_dep = ext_dep_relation.get("target") or ext_dep_relation.get(
-                "target_class"
+            # pode estar como 'relations' (parser novo) ou 'members' (parser alternativo)
+            body_relations = _ensure_list(body.get("relations")) or _ensure_list(
+                body.get("members")
             )
 
-            # 3. Validação: Alvos são Kinds existentes?
-            if target_char not in kinds or target_ext_dep not in kinds:
+        # procura por characterization e externalDependence (aceita variações de campos)
+        char_rel = None
+        extdep_rel = None
+        for r in body_relations:
+            if not isinstance(r, dict):
+                continue
+            stereo = r.get("stereotype")
+            # aceitar diferentes capitalizações caso o parser retorne assim
+            if isinstance(stereo, str) and stereo.lower() == "characterization":
+                char_rel = r
+            elif isinstance(stereo, str) and stereo.lower() in (
+                "externaldependence",
+                "externaldependence",
+            ):
+                extdep_rel = r
+            # também aceitar nomes diretos sem 'stereotype' (fallback)
+            elif r.get("name") and r.get("name").lower().startswith("character"):
+                char_rel = char_rel or r
+            elif r.get("name") and "external" in r.get("name").lower():
+                extdep_rel = extdep_rel or r
+
+        # se ambos presentes -> validar alvos
+        if char_rel and extdep_rel:
+            target_char = (
+                char_rel.get("target")
+                or char_rel.get("target_class")
+                or char_rel.get("targetClass")
+            )
+            target_ext = (
+                extdep_rel.get("target")
+                or extdep_rel.get("target_class")
+                or extdep_rel.get("targetClass")
+            )
+
+            # normalize target names (strings) — se algum for lista, pega primeiro
+            if isinstance(target_char, list):
+                target_char = target_char[0] if target_char else None
+            if isinstance(target_ext, list):
+                target_ext = target_ext[0] if target_ext else None
+
+            # targets devem existir como kinds
+            if target_char not in kinds_map or target_ext not in kinds_map:
                 errors.append(
                     {
-                        "type": "Invalid Target (Incomplete Pattern)",  # Incompleto
+                        "type": "Invalid Target (Incomplete Pattern)",
                         "pattern": "Mode Pattern",
-                        "message": f"DEDUÇÃO DE PADRÃO INCOMPLETO: O Mode '{mode_name}' está conectado a uma classe alvo ('{target_char}' ou '{target_ext_dep}') que não é uma Kind declarada.",
-                        "lineno": mode_decl.get("lineno", "N/A"),
+                        "message": (
+                            f"DEDUÇÃO DE PADRÃO INCOMPLETO: O Mode '{mode_name}' está conectado a um (ou ambos) alvo(s) "
+                            f"('{target_char}', '{target_ext}') que não são Kinds declaradas."
+                        ),
+                        "lineno": _safe_lineno_of(mode_decl),
                     }
                 )
                 continue
 
-            # 4. Validação Semântica: Kinds caracterizadas e dependentes devem ser distintas (idealmente)
-            if target_char == target_ext_dep:
+            # se os alvos forem iguais, emitir aviso sem impedir descoberta do padrão
+            if target_char == target_ext:
                 errors.append(
                     {
                         "type": "Semantic Warning (Coercion)",
                         "pattern": "Mode Pattern",
-                        "message": f"AVISO DE COERÇÃO: O Mode '{mode_name}' usa Characterization e External Dependence para a mesma Kind '{target_char}'. O Pattern clássico sugere Kinds distintas.",
-                        "lineno": mode_decl.get("lineno", "N/A"),
+                        "message": (
+                            f"AVISO DE COERÇÃO: O Mode '{mode_name}' usa Characterization e ExternalDependence para a mesma Kind '{target_char}'."
+                        ),
+                        "lineno": _safe_lineno_of(mode_decl),
                     }
                 )
 
-            # Padrão Mode completo encontrado
+            # padrão completo encontrado
             found.append(
                 {
                     "pattern": "Mode Pattern",
                     "mode_name": mode_name,
                     "characterizes": target_char,
-                    "depends_on": target_ext_dep,
-                    "lineno": mode_decl.get("lineno", "N/A"),
+                    "depends_on": target_ext,
+                    "lineno": _safe_lineno_of(mode_decl),
                 }
             )
+
         else:
-            # Dedução de Padrão Incompleto (Sobrecarga)
-            missing_rel = " @characterization" if not char_relation else ""
-            missing_rel += " @externalDependence" if not ext_dep_relation else ""
+            # construir mensagem de missing
+            missing = []
+            if not char_rel:
+                missing.append("@characterization")
+            if not extdep_rel:
+                missing.append("@externalDependence")
 
             errors.append(
                 {
-                    "type": "Incomplete Pattern (Deduction Failure)",  # Incompleto
+                    "type": "Incomplete Pattern (Deduction Failure)",
                     "pattern": "Mode Pattern",
-                    "message": f"DEDUÇÃO DE PADRÃO INCOMPLETO: O Mode '{mode_name}' está faltando a relação interna obrigatória:{missing_rel}.",
-                    "lineno": mode_decl.get("lineno", "N/A"),
+                    "message": f"DEDUÇÃO DE PADRÃO INCOMPLETO: O Mode '{mode_name}' está faltando: {', '.join(missing)}.",
+                    "lineno": _safe_lineno_of(mode_decl),
                 }
             )
 
@@ -504,86 +797,75 @@ def check_mode_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
 
 
 # ==============================================================================
-# 6. ROLEMIXIN PATTERN (RoleMixin -> Roles + Genset Disjoint Obrigatório)
+# 6. ROLEMIXIN PATTERN (RoleMixin → Roles + Genset disjoint obrigatório)
 # ==============================================================================
-def check_rolemixin_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
+def check_rolemixin_pattern(
+    ast: Dict[str, Any], table: Dict[str, Any]
+) -> Tuple[List[Dict], List[Dict]]:
     """
-    Verifica instâncias do RoleMixin Pattern.
+    RoleMixin Pattern:
 
     Regras Semânticas:
-    ------------------
-    1. Se um RoleMixin for especializado por uma ou mais Roles,
-       ENTÃO deve existir um GeneralizationSet cujo 'general' = RoleMixin.
-
-    2. Este Genset DEVE possuir o modificador 'disjoint'.
-
-    3. O GenSet deve listar AO MENOS duas classes do tipo 'role'.
-
-    4. Todos os 'specifics' do Genset devem ser estereótipo 'role'.
-
-    Retorna:
-        found_patterns: lista de padrões válidos encontrados.
-        semantic_errors: lista de violações semânticas.
+      1. Se um RoleMixin é especializado por ≥ 1 Roles → Genset é obrigatório
+      2. O Genset DEVE ser 'disjoint'
+      3. Genset deve listar ≥ 2 specifics
+      4. Todos os specifics devem ser Roles
+      5. O Genset deve cobrir TODAS as Roles especializantes
+      6. lineno do padrão = genset.lineno (fallback roleMixin.lineno)
     """
-    errors = []
-    found = []
+    errors: List[Dict] = []
+    found: List[Dict] = []
 
-    # ----------------------------------------------------------------------
-    # 1. COLETA PRELIMINAR
-    # ----------------------------------------------------------------------
-    rolemixins = {}
-    roles = {}
-    gensets_by_general = defaultdict(list)
-    specializes_map = defaultdict(list)
+    # ------------------------------------------------------------------
+    # Helpers defensivos
+    # ------------------------------------------------------------------
+    def _ensure_list(v):
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return v
+        return [v]
 
-    for decl in ast.get("declarations", []):
-        decl_type = decl.get("type")
+    def _safe_lineno(primary, fallback=None):
+        for d in (primary, fallback):
+            if isinstance(d, dict):
+                ln = d.get("lineno")
+                if isinstance(ln, int) and ln > 0:
+                    return ln
+        return 1
 
-        # Classes Normais
-        if decl_type == "ClassDeclaration":
-            name = decl.get("name")
-            stereotype = decl.get("stereotype")
+    # ------------------------------------------------------------------
+    # Coleta estrutural (preferencialmente via table)
+    # ------------------------------------------------------------------
+    rolemixins = table.get("classes_by_stereotype", {}).get("roleMixin", {})
+    roles = table.get("classes_by_stereotype", {}).get("role", {})
+    gensets = table.get("gensets", [])
+    specializes_map = table.get("specializes_map", {})
 
-            # ATENÇÃO: estereótipo vindo da AST costuma ser "roleMixin"
-            if stereotype == "roleMixin":
-                rolemixins[name] = decl
+    all_role_names = set(roles.keys())
 
-            elif stereotype == "role":
-                roles[name] = decl
-
-            # mapear especializações (Super → [Subclasses])
-            for sup in decl.get("specializes", []):
-                specializes_map[sup].append(name)
-
-        # GeneralizationSets
-        elif decl_type == "GeneralizationSet":
-            general = decl.get("general")
-            if general:
-                gensets_by_general[general].append(decl)
-
-    # ----------------------------------------------------------------------
-    # 2. VERIFICAÇÃO DO PADRÃO (LÓGICA ALTERADA)
-    # ----------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Verificação por RoleMixin
+    # ------------------------------------------------------------------
     for rm_name, rm_decl in rolemixins.items():
-        lineno_rm = rm_decl.get("lineno", "N/A")
+        lineno_rm = _safe_lineno(rm_decl)
 
-        # Quais roles realmente especializam o RoleMixin?
+        # Roles que especializam este RoleMixin
         specializing_roles = [
-            role_name
-            for role_name in specializes_map.get(rm_name, [])
-            if role_name in roles
+            r for r in specializes_map.get(rm_name, []) if r in all_role_names
         ]
 
-        # Caso 1: RoleMixin não é especializado por nenhuma role → não há padrão
-        if len(specializing_roles) == 0:
-            continue  # Não gera erro, apenas não configura padrão
+        # Caso 0 — não há especialização por Role → não é padrão
+        if not specializing_roles:
+            continue
 
-        # Caso 2: RoleMixin especializado por roles → Genset obrigatório
-        associated_gensets = gensets_by_general.get(rm_name, [])
-        pattern_found_in_genset = False
+        # Gensets cujo general = RoleMixin
+        related_gensets = [g for g in gensets if g.get("general") == rm_name]
 
-        # O Genset é obrigatório, mas se ele estiver ausente, devemos reportar o erro
-        if not associated_gensets:
+        # ------------------------------------------------------------------
+        # ERRO: Genset obrigatório ausente
+        # ------------------------------------------------------------------
+        if not related_gensets:
             errors.append(
                 {
                     "type": "Incomplete Pattern (Mandatory Genset Missing)",
@@ -591,28 +873,26 @@ def check_rolemixin_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]
                     "message": (
                         f"O RoleMixin '{rm_name}' é especializado por Roles "
                         f"({', '.join(specializing_roles)}), mas NÃO possui "
-                        f"nenhum GeneralizationSet. O padrão exige um Genset "
-                        f"com modificador 'disjoint' cobrindo as Roles especializantes."
+                        f"nenhum GeneralizationSet."
                     ),
                     "lineno": lineno_rm,
                 }
             )
-            # Continua o loop do RoleMixin para o próximo, o erro já foi reportado
             continue
 
         # ------------------------------------------------------------------
-        # 3. Verificar cada Genset associado ao RoleMixin
+        # Verifica cada Genset associado
         # ------------------------------------------------------------------
-        for gs in associated_gensets:
+        for gs in related_gensets:
             gs_name = gs.get("name", "N/A")
-            gs_modifiers = gs.get("modifiers", [])
-            gs_specifics = set(gs.get("specifics", []))
-            gs_lineno = gs.get("lineno", "N/A")
+            gs_mod = set(_ensure_list(gs.get("modifiers")))
+            gs_specs = set(_ensure_list(gs.get("specifics")))
+            gs_lineno = _safe_lineno(gs, rm_decl)
 
-            is_valid_genset = True  # Flag para checar se este Genset é válido
+            valid = True
 
-            # Regra: Genset DEVE ser 'disjoint'
-            if "disjoint" not in gs_modifiers:
+            # (1) disjoint obrigatório
+            if "disjoint" not in gs_mod:
                 errors.append(
                     {
                         "type": "Semantic Error (Mandatory Constraint)",
@@ -624,94 +904,85 @@ def check_rolemixin_pattern(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]
                         "lineno": gs_lineno,
                     }
                 )
-                is_valid_genset = False
-                # Continua verificando outros Gensets (se houver), mas não marca este como válido.
+                valid = False
 
-            # Regra: Ao menos duas roles
-            if len(gs_specifics) < 2:
+            # (2) ao menos duas roles
+            if len(gs_specs) < 2:
                 errors.append(
                     {
                         "type": "Incomplete Pattern (Too Few Specifics)",
                         "pattern": "RoleMixin Pattern",
                         "message": (
-                            f"O Genset '{gs_name}' associado ao RoleMixin '{rm_name}' "
-                            f"possui menos de duas classes em 'specifics'. "
-                            f"O padrão exige pelo menos duas roles."
+                            f"O Genset '{gs_name}' possui menos de duas classes em 'specifics'."
                         ),
                         "lineno": gs_lineno,
                     }
                 )
-                is_valid_genset = False
+                valid = False
 
-            # Regra: Todos os specifics devem ser roles
-            non_role_specifics = [name for name in gs_specifics if name not in roles]
-            if non_role_specifics:
+            # (3) specifics devem ser Roles
+            non_roles = [s for s in gs_specs if s not in all_role_names]
+            if non_roles:
                 errors.append(
                     {
                         "type": "Semantic Error (Type Violation)",
                         "pattern": "RoleMixin Pattern",
                         "message": (
-                            f"O Genset '{gs_name}' possui 'specifics' que não são Roles: "
-                            f"{', '.join(non_role_specifics)}. "
-                            f"O RoleMixin Pattern exige somente estereótipos 'role'."
+                            f"O Genset '{gs_name}' possui specifics que não são Roles: "
+                            f"{', '.join(non_roles)}."
                         ),
                         "lineno": gs_lineno,
                     }
                 )
-                is_valid_genset = False
+                valid = False
 
-            # ------------------------------------------------------------------
-            # NOVO CHECK: Verificar se as Roles especializantes estão no Genset
-            # ------------------------------------------------------------------
-            if is_valid_genset:
-                missing_in_genset = set(specializing_roles) - gs_specifics
-
-                if missing_in_genset:
+            # (4) deve cobrir todas as Roles especializantes
+            if valid:
+                missing = set(specializing_roles) - gs_specs
+                if missing:
                     errors.append(
                         {
                             "type": "Incomplete Pattern (Missing Specifics)",
                             "pattern": "RoleMixin Pattern",
                             "message": (
-                                "DEDUÇÃO DE PADRÃO INCOMPLETO: "
+                                f"DEDUÇÃO DE PADRÃO INCOMPLETO: "
                                 f"O Genset '{gs_name}' não inclui todas as Roles especializantes. "
-                                f"Roles ausentes: {', '.join(missing_in_genset)}."
+                                f"Ausentes: {', '.join(sorted(missing))}."
                             ),
                             "lineno": gs_lineno,
                         }
                     )
-
-                # Se o Genset é válido em termos de tipos e modificadores, considera-se o padrão encontrado
-                # mesmo se houver Roles faltando (para que o erro de dedução seja o único reportado, não a ausência total)
-                if not missing_in_genset:
-                    pattern_found_in_genset = True
+                else:
+                    # ✅ PADRÃO COMPLETO
                     found.append(
                         {
                             "pattern": "RoleMixin Pattern",
                             "rolemixin": rm_name,
-                            "roles_grouped": list(gs_specifics),
+                            "roles_grouped": sorted(gs_specs),
                             "genset_name": gs_name,
-                            "lineno": lineno_rm,
                             "is_disjoint": True,
+                            "lineno": gs_lineno,
                         }
                     )
-
-        # Se houver Gensets, mas nenhum deles satisfez as condições mínimas (disjoint e >= 2 roles),
-        # ou se o Genset válido falhou ao cobrir as roles, o erro de Genset Missing não é reportado.
-        # Mas garantimos que o erro de Missing Specifics ou Constraint Violation seja reportado.
 
     return found, errors
 
 
 # ==============================================================================
-# FUNÇÃO PRINCIPAL DE ANÁLISE SEMÂNTICA E FORMATO DE SAÍDA
+# FUNÇÃO PRINCIPAL DE ANÁLISE SEMÂNTICA
 # ==============================================================================
 def run_semantic_checks(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
     """
-    Orquestra a execução de todos os verificadores de padrões de ontologia.
-    """
-    all_found = []
-    all_errors = []
+    Orquestra a execução de todos os verificadores semânticos
+    utilizando uma symbol table unificada.
 
+    Retorna:
+        (found_patterns, validation_errors)
+    """
+    # 1. Construção da symbol table central
+    table = build_symbol_table(ast)
+
+    # 2. Lista de checkers semânticos
     checkers = [
         check_subkind_pattern,
         check_role_pattern,
@@ -721,101 +992,166 @@ def run_semantic_checks(ast: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
         check_rolemixin_pattern,
     ]
 
+    all_found: List[Dict] = []
+    all_errors: List[Dict] = []
+
+    # 3. Execução coordenada
     for checker in checkers:
-        found, errors = checker(ast)
+        found, errors = checker(ast, table)
         all_found.extend(found)
         all_errors.extend(errors)
 
     return all_found, all_errors
 
 
+# ==============================================================================
+# Helper para identificação do elemento central do padrão
+# ==============================================================================
+def extract_general_name(p: Dict[str, Any]) -> str:
+    pattern = p.get("pattern")
+
+    if pattern in {"Subkind Pattern", "Role Pattern", "Phase Pattern"}:
+        return p.get("kind")
+
+    if pattern == "RoleMixin Pattern":
+        return p.get("rolemixin")
+
+    if pattern == "Relator Pattern":
+        return p.get("relator_name")
+
+    if pattern == "Mode Pattern":
+        return p.get("mode_name")
+
+    return "<unknown>"
+
+
+# ==============================================================================
+# FORMATAÇÃO DO RELATÓRIO UNIFICADO
+# ==============================================================================
 def format_unified_output(found_patterns: List[Dict], validation_errors: List[Dict]):
     """
-    Formata a saída unificada conforme os três requisitos.
+    Imprime relatório consolidado de análise semântica:
+
+      (1) Padrões completos encontrados
+      (2) Erros de coerção (violações semânticas obrigatórias)
+      (3) Padrões incompletos / dedução / sobrecarga
     """
 
-    # (1) Padrões encontrados por linhas de código
+    # ------------------------------------------------------------------
+    # (1) PADRÕES ENCONTRADOS
+    # ------------------------------------------------------------------
     output_found = []
+
     for p in found_patterns:
-        # Tenta extrair a Kind (ou RoleMixin/Mode/Relator) e os specifics (Subkinds/Roles/Phases)
-        general_name = p.get("kind") or p.get("rolemixin") or p.get("rolemixin_name")
+        general_name = extract_general_name(p)
 
-        specifics_list = p.get("subkinds") or p.get("roles_grouped") or p.get("phases")
-
-        details = ""
-        if p["pattern"] == "RoleMixin Pattern":
-            details = (
-                f"RoleMixin: {general_name} -> Roles: " f"{', '.join(specifics_list)}"
-            )
-
-        elif general_name and specifics_list:
-            details = f"Kind: {general_name} -> Specifics: {', '.join(specifics_list)}"
-        elif p["pattern"] == "Relator Pattern":
-            details = f"Roles mediadas: {p['role1']} e {p['role2']}. Relator: {p['relator_name']}"
-        elif p["pattern"] == "Mode Pattern":
-            details = f"Caracteriza: {p['characterizes']} e Depende: {p['depends_on']}"
-
-        output_found.append(
-            f"  [LINHA {p.get('lineno', 'N/A')}] Padrão {p['pattern']} encontrado. {details}"
+        specifics = (
+            p.get("subkinds")
+            or p.get("roles")
+            or p.get("roles_grouped")
+            or p.get("phases")
         )
 
-    # (2) Erros a serem corrigidos por coerção
+        if p["pattern"] == "RoleMixin Pattern":
+            details = (
+                f"RoleMixin: {general_name} -> Roles: {', '.join(specifics or [])}"
+            )
+
+        elif p["pattern"] == "Relator Pattern":
+            details = (
+                f"Roles mediadas: {p.get('role1')} e {p.get('role2')}. "
+                f"Relator: {p.get('relator_name')}"
+            )
+
+        elif p["pattern"] == "Mode Pattern":
+            details = (
+                f"Caracteriza: {p.get('characterizes')} | "
+                f"Depende: {p.get('depends_on')}"
+            )
+
+        elif general_name and specifics:
+            details = f"Kind: {general_name} -> Specifics: {', '.join(specifics)}"
+
+        else:
+            details = json.dumps(p, ensure_ascii=False)
+
+        output_found.append(
+            f"  [LINHA {p.get('lineno')}] "
+            f"Padrão {p['pattern']} encontrado. {details}"
+        )
+
+    # ------------------------------------------------------------------
+    # (2) ERROS DE COERÇÃO
+    # ------------------------------------------------------------------
     output_coercion = []
+
     for e in validation_errors:
-        if "Coerção" in e["type"] or "Coercion" in e["type"]:
-            message = (
+        if "Coerção" in e.get("type", "") or "Coercion" in e.get("type", ""):
+            msg = (
                 e["message"]
                 .replace("ERRO POR COERÇÃO: ", "")
                 .replace("AVISO DE COERÇÃO: ", "")
             )
+
             output_coercion.append(
-                f"  [LINHA {e.get('lineno', 'N/A')}] ERRO DE COERÇÃO: ({e['pattern']}): {message}"
+                f"  [LINHA {e.get('lineno')}] "
+                f"ERRO DE COERÇÃO ({e['pattern']}): {msg}"
             )
 
-    # (3) Dedução de padrões incompletos, usando sobrecarregamento
+    # ------------------------------------------------------------------
+    # (3) PADRÕES INCOMPLETOS / DEDUÇÃO
+    # ------------------------------------------------------------------
     output_incomplete = []
+
     for e in validation_errors:
-        if "Incomplete Pattern" in e["type"] or "Invalid Target" in e["type"]:
-            message = e["message"].replace("DEDUÇÃO DE PADRÃO INCOMPLETO: ", "")
+        if "Incomplete Pattern" in e.get("type", "") or "Invalid Target" in e.get(
+            "type", ""
+        ):
+            msg = e["message"].replace("DEDUÇÃO DE PADRÃO INCOMPLETO: ", "")
             output_incomplete.append(
-                f"  [LINHA {e.get('lineno', 'N/A')}] PADRÃO INCOMPLETO (Dedução/Sobrecarga): ({e['pattern']}): {message}"
+                f"  [LINHA {e.get('lineno')}] "
+                f"PADRÃO INCOMPLETO ({e['pattern']}): {msg}"
             )
 
+    # ------------------------------------------------------------------
+    # IMPRESSÃO FINAL
+    # ------------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("        RELATÓRIO UNIFICADO DE ANÁLISE SEMÂNTICA".center(60))
+    print("RELATÓRIO UNIFICADO DE ANÁLISE SEMÂNTICA".center(60))
     print("=" * 60)
 
-    print("\n(1) PADRÕES DE PROJETO ENCONTRADOS POR LINHA DE CÓDIGO:")
-    if output_found:
-        print("\n".join(output_found))
-    else:
-        print("  Nenhum padrão de projeto completo foi encontrado.")
-
-    print("\n" + "-" * 60)
+    print("\n(1) PADRÕES DE PROJETO ENCONTRADOS:")
     print(
-        "\n(2) ERROS A SEREM CORRIGIDOS POR COERÇÃO (Violações de Restrições Semânticas):"
+        "\n".join(output_found)
+        if output_found
+        else "  Nenhum padrão completo encontrado."
     )
-    if output_coercion:
-        print("\n".join(output_coercion))
-    else:
-        print("  Nenhum erro de coerção encontrado.")
 
     print("\n" + "-" * 60)
-    print("\n(3) DEDUÇÃO DE PADRÕES INCOMPLETOS / AMBIGUIDADE (Sobrecarga de Regras):")
-    if output_incomplete:
-        print("\n".join(output_incomplete))
-    else:
-        print("  Nenhuma estrutura de padrão incompleta ou ambígua detectada.")
+    print("\n(2) ERROS DE COERÇÃO (VIOLAÇÕES SEMÂNTICAS):")
+    print(
+        "\n".join(output_coercion)
+        if output_coercion
+        else "  Nenhum erro de coerção encontrado."
+    )
+
+    print("\n" + "-" * 60)
+    print("\n(3) DEDUÇÃO DE PADRÕES INCOMPLETOS / AMBIGUIDADE:")
+    print(
+        "\n".join(output_incomplete)
+        if output_incomplete
+        else "  Nenhuma estrutura incompleta ou ambígua detectada."
+    )
+
     print("\n" + "=" * 60)
 
 
-# --- Bloco Main (Mantido para testes) ---
+# --- Bloco Main para teste rápido ---
 if __name__ == "__main__":
-    # Exemplo de AST que usa a estrutura GeneralizationSet do seu parser:
     dummy_ast = {
         "package": "Teste",
         "declarations": [
-            # 1. Subkind Pattern (Correto) - Linha 1-4
+            # Subkind example
             {
                 "type": "ClassDeclaration",
                 "stereotype": "kind",
@@ -844,7 +1180,7 @@ if __name__ == "__main__":
                 "specifics": ["Homem", "Mulher"],
                 "lineno": 4,
             },
-            # 2. Role Pattern (ERRO POR COERÇÃO: Genset é 'disjoint' - Linha 5-8
+            # Role example with disjoint GS (should produce coercion error)
             {
                 "type": "ClassDeclaration",
                 "stereotype": "kind",
@@ -868,17 +1204,17 @@ if __name__ == "__main__":
             {
                 "type": "GeneralizationSet",
                 "name": "PapeisAgente",
-                "modifiers": ["disjoint"],  # O Role Pattern exige Non-disjoint. ERRO!
+                "modifiers": ["disjoint"],
                 "general": "Agente",
                 "specifics": ["Cliente", "Vendedor"],
                 "lineno": 8,
             },
-            # 3. Phase Pattern (Kind sem lineno para forçar o erro e testar a correção) - Linha 9-11
+            # Phase example
             {
                 "type": "ClassDeclaration",
                 "stereotype": "kind",
                 "name": "Documento",
-            },  # Sem lineno propositalmente
+            },  # intentionally no lineno
             {
                 "type": "ClassDeclaration",
                 "stereotype": "phase",
