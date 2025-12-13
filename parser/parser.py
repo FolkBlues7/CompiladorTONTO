@@ -108,6 +108,9 @@ def p_declaracao_classe(p):
         "nature": p[3],
         "specializes": p[4],
         "body": p[5],
+        "lineno": p.lineno(
+            1
+        ),  # <--- CORREÇÃO: Captura o número da linha do estereótipo (p[1])
     }
 
 
@@ -179,13 +182,16 @@ def p_classe_relation_internal(p):
     }
 
 
-# (MODIFICADO) Usa class_identifier para listas de especialização
+# NOVO: Recursão à esquerda
 def p_lista_nomes_classe(p):
-    """lista_nomes_classe : class_identifier COMMA lista_nomes_classe
+    """lista_nomes_classe : lista_nomes_classe COMMA class_identifier
     | class_identifier"""
     if len(p) == 4:
-        p[0] = [p[1]] + p[3]
+        # p[1] é a lista acumulada, p[3] é o novo nome
+        p[1].append(p[3])
+        p[0] = p[1]
     else:
+        # Caso base (o primeiro item da lista)
         p[0] = [p[1]]
 
 
@@ -385,7 +391,14 @@ def p_tipo_primitivo_7(p):
 # Nota: genset aceita nome_identificador (maiúscula ou minúscula)
 def p_declaracao_genset(p):
     """declaracao_genset : genset_modifiers GENSET nome_identificador genset_form"""
-    p[0] = {"type": "GeneralizationSet", "name": p[3], "modifiers": p[1], **p[4]}
+    # Adiciona 'lineno' para o Genset. O token GENSET é p[2]
+    p[0] = {
+        "type": "GeneralizationSet",
+        "name": p[3],
+        "modifiers": p[1],
+        **p[4],
+        "lineno": p.lineno(2),
+    }
 
 
 def p_genset_modifiers(p):
