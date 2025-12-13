@@ -230,21 +230,48 @@ Pressione ENTER para continuar...
 
 A estrutura acima é gerada dinamicamente com base nos nós sintáticos identificados pelo parser.
 
-## 🔍 Fase 3 — Análise Semântica (Em Construção)
+## 🧠 Fase 3 — Análise Semântica
 
-A terceira fase do compilador — a análise semântica — está sendo desenvolvida e será responsável por verificar:
+A terceira e última fase do compilador implementa a **Análise Semântica**, focada na validação de **Padrões de Projeto de Ontologias (ODPs - Ontology Design Patterns)**.
 
-consistência entre estereótipos e tipos ontológicos
+Nesta etapa, o compilador não verifica apenas se o código está "gramaticalmente correto", mas se ele faz "sentido ontológico", respeitando as regras da linguagem UFO/TONTO.
 
-correspondência entre papéis e classes que os suportam
+### 🛡️ Funcionalidades Semânticas
 
-coerência das cardinalidades
+O analisador utiliza uma **Tabela de Símbolos** centralizada para cruzar informações entre Classes, Relações e Conjuntos de Generalização (Gensets).
 
-restrições semânticas de relações e relators
+Ele é capaz de identificar e validar os seguintes padrões:
 
-herança e especialização compatíveis
+1.  **Subkind Pattern**: Verifica se o *Genset* é disjunto (`disjoint`) e rígido.
+2.  **Role Pattern**: Verifica a regra de anti-rigidez (o *Genset* **não** pode ser `disjoint`).
+3.  **Phase Pattern**: Verifica a regra temporal (o *Genset* **deve** ser `disjoint`).
+4.  **Relator Pattern**: Garante que o Relator conecte pelo menos duas entidades e possua uma relação material derivada.
+5.  **Mode Pattern**: Verifica se o Modo possui relações de caracterização (`@characterization`) e dependência externa.
+6.  **RoleMixin Pattern**: Valida abstrações de papéis através de *Gensets* disjuntos.
 
-O menu já está implementado e pode ser selecionado:
+### 🚨 Tratamento de Erros e Coerção
 
-[EM CONSTRUÇÃO] A Fase 3 ainda não está disponível.
-Retorne ao menu para escolher outra opção.
+O sistema implementa **Coerção de Erros**, identificando violações de restrições ontológicas e apontando inconsistências lógicas:
+
+* **Detecção de Padrões Incompletos**: Se o usuário declara um Relator mas esquece a relação material, o sistema avisa exatamente o que está faltando.
+* **Violação de Rigidez**: Alerta se uma *Role* (anti-rígida) for declarada dentro de um conjunto disjunto, o que é logicamente proibido.
+
+### 💻 Exemplo de Saída Semântica
+
+Ao analisar um arquivo com inconsistências, o compilador gera um relatório detalhado:
+
+```text
+============================================================
+      RELATÓRIO DE ANÁLISE SEMÂNTICA & PADRÕES (ODPs)
+============================================================
+
+✅ PADRÕES ONTOLÓGICOS IDENTIFICADOS:
+   [Linha 12] Subkind Pattern
+     └─ Kind 'Person' particionada em ['Man', 'Woman']
+
+❌ VIOLAÇÕES E AVISOS SEMÂNTICOS:
+   [Linha 45] ERRO SEMÂNTICO (Violação Anti-Rigidez)
+     └─ O Genset 'RolesGenset' (Kind 'Person') com Roles NÃO deve ser 'disjoint'.
+   
+   [Linha 88] PADRÃO INCOMPLETO (Relator)
+     └─ Entre as Roles 'Employee' e 'Employer' falta: Relação @material.

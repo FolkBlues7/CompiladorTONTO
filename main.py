@@ -3,6 +3,8 @@ import sys
 import json  # <-- Importante para formatar a AST
 from collections import Counter
 
+
+
 # --- Importações dos nossos módulos ---
 
 # Importa o lexer, necessário para a Análise Léxica (Fase 1)
@@ -567,29 +569,23 @@ def run_analysis_sintatica(codigo_para_analise, nome_do_teste):
 
 
 def run_analysis_semantica(codigo_para_analise, nome_do_teste):
-    """Executa a ANÁLISE SEMÂNTICA (Fase 3)"""
+    """ Executa a ANÁLISE SEMÂNTICA (Fase 3) """
     print(f"\n--- Iniciando Análise SEMÂNTICA para: {nome_do_teste} ---")
 
-    # 1. Obter a Árvore de Sintaxe Abstrata (AST) a partir do código
+    # 1. Precisa rodar o Parser primeiro para ter a AST
+    # O silêncio do parser é importante aqui, então não imprimimos a árvore visual
     ast_result = parse_tonto_code(codigo_para_analise)
 
     if not ast_result:
-        print(
-            "\n[FALHA] Não foi possível realizar a Análise Semântica: Erro Sintático Encontrado."
-        )
-        # Se houver erro sintático, a AST é nula ou incompleta e não podemos prosseguir.
+        print("\n[ERRO CRÍTICO] A Análise Semântica não pode continuar pois a Análise Sintática falhou.")
+        print("Corrija os erros sintáticos antes de prosseguir.")
         return
 
-    print("\n[SUCESSO] AST Gerada. Iniciando Verificação de Padrões Semânticos...")
+    # 2. Executa a Análise Semântica
+    found_patterns, errors = run_semantic_checks(ast_result)
 
-    # 2. Executar as verificações de padrões e coletar resultados
-    # run_semantic_checks retorna (padrões_encontrados, erros_de_validação)
-    found_patterns, validation_errors = run_semantic_checks(ast_result)
-
-    # 3. Formatar e imprimir o relatório unificado (Requisito 3)
-    format_unified_output(found_patterns, validation_errors)
-
-    print("\n--- Análise Semântica Concluída ---")
+    # 3. Exibe os resultados
+    format_unified_output(found_patterns, errors)
 
 
 # =============================================================================
