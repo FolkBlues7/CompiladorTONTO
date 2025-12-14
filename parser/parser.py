@@ -2,6 +2,19 @@ import ply.yacc as yacc
 import json
 import os
 
+CURRENT_CODE = ""
+
+
+def lineno_from_pos(pos: int) -> int:
+    """
+    Calcula o número da linha contando quebras de linha em CURRENT_CODE
+    até a posição 'pos'.
+    """
+    if pos is None or pos < 0:
+        return 0
+    return CURRENT_CODE.count("\n", 0, pos) + 1
+
+
 # =============================================================================
 # 1. IMPORTAÇÃO DOS TOKENS E LEXER
 # =============================================================================
@@ -101,6 +114,10 @@ def p_declaracao(p):
 # (MODIFICADO) Usa class_identifier
 def p_declaracao_classe(p):
     """declaracao_classe : estereotipo_classe class_identifier classe_natureza_opcional classe_specialization classe_body"""
+    # Posição do segundo símbolo (class_identifier) na entrada
+    pos = p.lexpos(2)  # <- pega a posição do identificador no código
+    line = lineno_from_pos(pos)
+
     p[0] = {
         "type": "ClassDeclaration",
         "stereotype": p[1],
@@ -108,9 +125,7 @@ def p_declaracao_classe(p):
         "nature": p[3],
         "specializes": p[4],
         "body": p[5],
-        "lineno": p.lineno(
-            1
-        ),  # <--- CORREÇÃO: Captura o número da linha do estereótipo (p[1])
+        "lineno": line,
     }
 
 
@@ -461,6 +476,7 @@ def p_declaracao_relacao_externa(p):
         "name": p[2],
         "specializes": p[3],
         "body": p[4],
+        "lineno": p.lineno(1),  # linha do token RELATOR ou RELATION
     }
 
 
@@ -497,7 +513,6 @@ def p_tipo_relacao_externa(p):
 
 def p_declaracao_relacao_inline_com_estereotipo(p):
     """declaracao_relacao_inline : AT estereotipo_relacao RELATION class_identifier cardinalidade_opcional seta RELATION_NAME seta cardinalidade_opcional class_identifier"""
-
     p[0] = {
         "type": "InlineRelation",
         "stereotype": p[2],
@@ -508,6 +523,7 @@ def p_declaracao_relacao_inline_com_estereotipo(p):
         "right_arrow": p[8],
         "target_cardinality": p[9],
         "target_class": p[10],
+        "lineno": p.lineno(1),  # linha do '@'
     }
 
 
@@ -521,6 +537,7 @@ def p_relacao_interna_relator(p):
         "arrow": p[4],
         "right_cardinality": p[5],
         "target_class": p[6],
+        "lineno": p.lineno(1),  # linha do '@'
     }
 
 
@@ -533,6 +550,7 @@ def p_declaracao_relacao_interna(p):
         "name": p[3],
         "cardinality": p[5],
         "target_class": p[6],
+        "lineno": p.lineno(3),  # linha do nome da relação
     }
 
 
@@ -737,6 +755,7 @@ def p_error(p):
 # =============================================================================
 # 4. CONSTRUÇÃO DO PARSER
 # =============================================================================
+# print("DEBUG PARSER FILE:", __file__)
 parser = yacc.yacc(
     write_tables=True,  # gera (e depois reutiliza) parsetab.py
     debug=False,
@@ -748,8 +767,13 @@ def parse_tonto_code(code_string):
     """
     Função principal para analisar o código TONTO.
     """
-    global has_error
+    global has_error, CURRENT_CODE
     has_error = False
+
+    # Normaliza EOL para garantir coerência
+    code_string = code_string.replace("\r\n", "\n").replace("\r", "\n")
+    CURRENT_CODE = code_string
+
     lexer.lineno = 1
     ast_result = parser.parse(code_string, lexer=lexer)
     if has_error:
