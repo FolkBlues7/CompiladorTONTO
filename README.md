@@ -268,47 +268,51 @@ genset LifeStages {
 =======
 ## 🧠 Fase 3 — Análise Semântica
 
-A terceira e última fase do compilador implementa a **Análise Semântica**, focada na validação de **Padrões de Projeto de Ontologias (ODPs - Ontology Design Patterns)**.
+A terceira e última fase do compilador implementa a **Análise Semântica**, focada na validação de **Padrões de Projeto de Ontologias (ODPs - Ontology Design Patterns)** baseados na UFO (*Unified Foundational Ontology*).
 
-Nesta etapa, o compilador não verifica apenas se o código está "gramaticalmente correto", mas se ele faz "sentido ontológico", respeitando as regras da linguagem UFO/TONTO.
+Nesta etapa, o compilador utiliza a Árvore Sintática Abstrata (AST) gerada anteriormente para construir uma **Tabela de Símbolos** centralizada e verificar se as estruturas definidas respeitam as regras lógicas e ontológicas da linguagem.
 
-### 🛡️ Funcionalidades Semânticas
+### 🛡️ Padrões Verificados
 
-O analisador utiliza uma **Tabela de Símbolos** centralizada para cruzar informações entre Classes, Relações e Conjuntos de Generalização (Gensets).
+O analisador valida os 6 principais padrões estruturais da linguagem TONTO:
 
-Ele é capaz de identificar e validar os seguintes padrões:
-
-1.  **Subkind Pattern**: Verifica se o *Genset* é disjunto (`disjoint`) e rígido.
-2.  **Role Pattern**: Verifica a regra de anti-rigidez (o *Genset* **não** pode ser `disjoint`).
-3.  **Phase Pattern**: Verifica a regra temporal (o *Genset* **deve** ser `disjoint`).
-4.  **Relator Pattern**: Garante que o Relator conecte pelo menos duas entidades e possua uma relação material derivada.
-5.  **Mode Pattern**: Verifica se o Modo possui relações de caracterização (`@characterization`) e dependência externa.
-6.  **RoleMixin Pattern**: Valida abstrações de papéis através de *Gensets* disjuntos.
+1.  **Subkind Pattern**: Verifica se o *Genset* é **rígido** e disjunto (`disjoint`).
+2.  **Role Pattern**: Verifica a regra de **anti-rigidez** (o *Genset* **não** pode ser `disjoint`).
+3.  **Phase Pattern**: Verifica a regra de **mudança temporal** (o *Genset* **deve** ser `disjoint`).
+4.  **Relator Pattern**: Garante que o Relator conecte pelo menos duas entidades distintas via `@mediation` e possua uma relação material derivada.
+5.  **Mode Pattern**: Valida se o Modo possui relações intrínsecas de caracterização (`@characterization`) e dependência externa (`@externalDependence`).
+6.  **RoleMixin Pattern**: Valida a abstração de papéis de tipos disjuntos através de um *Genset* obrigatoriamente `disjoint`.
 
 ### 🚨 Tratamento de Erros e Coerção
 
-O sistema implementa **Coerção de Erros**, identificando violações de restrições ontológicas e apontando inconsistências lógicas:
+O sistema de relatório foi desenhado para ser intuitivo e educativo, dividindo os resultados em três categorias lógicas:
 
-* **Detecção de Padrões Incompletos**: Se o usuário declara um Relator mas esquece a relação material, o sistema avisa exatamente o que está faltando.
-* **Violação de Rigidez**: Alerta se uma *Role* (anti-rígida) for declarada dentro de um conjunto disjunto, o que é logicamente proibido.
+* **(1) Padrões Encontrados**: Estruturas que estão semanticamente corretas e completas.
+* **(2) Erros de Coerção**: Violações diretas de regras ontológicas (ex: declarar um conjunto de *Roles* como disjunto). O compilador identifica a intenção do usuário e aponta a regra violada.
+* **(3) Padrões Incompletos**: Situações de ambiguidade onde o usuário iniciou a declaração de um padrão (ex: criou um *Relator*), mas esqueceu componentes essenciais (ex: faltou a relação `@material`).
 
 ### 💻 Exemplo de Saída Semântica
 
-Ao analisar um arquivo com inconsistências, o compilador gera um relatório detalhado:
+Abaixo, um exemplo real do relatório gerado pelo compilador ao analisar um código com inconsistências:
 
 ```text
-============================================================
-      RELATÓRIO DE ANÁLISE SEMÂNTICA & PADRÕES (ODPs)
+          RELATÓRIO UNIFICADO DE ANÁLISE SEMÂNTICA
 ============================================================
 
-✅ PADRÕES ONTOLÓGICOS IDENTIFICADOS:
-   [Linha 12] Subkind Pattern
-     └─ Kind 'Person' particionada em ['Man', 'Woman']
+(1) PADRÕES DE PROJETO ENCONTRADOS:
+  ✅ [LINHA 12] Relator Pattern
+     └─ Relator 'Consulta' materializado por 'atende' conectando Medico e Paciente
 
-❌ VIOLAÇÕES E AVISOS SEMÂNTICOS:
-   [Linha 45] ERRO SEMÂNTICO (Violação Anti-Rigidez)
-     └─ O Genset 'RolesGenset' (Kind 'Person') com Roles NÃO deve ser 'disjoint'.
-   
-   [Linha 88] PADRÃO INCOMPLETO (Relator)
-     └─ Entre as Roles 'Employee' e 'Employer' falta: Relação @material.
->>>>>>> branch-semantica
+------------------------------------------------------------
+
+(2) ERROS DE COERÇÃO (VIOLAÇÕES SEMÂNTICAS):
+  ❌ [LINHA 45] ERRO DE COERÇÃO (Role Pattern):
+     O Genset 'Papeis_Funcionario' que especializa a Kind 'Pessoa' com Roles NÃO deve ser 'disjoint'.
+
+------------------------------------------------------------
+
+(3) DEDUÇÃO DE PADRÕES INCOMPLETOS / AMBIGUIDADE:
+  ⚠️  [LINHA 88] PADRÃO INCOMPLETO (Mode Pattern):
+     O Mode 'Sintoma' está faltando: @characterization.
+
+============================================================
