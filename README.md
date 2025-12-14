@@ -311,7 +311,7 @@ Abaixo, um exemplo real do relatório gerado pelo compilador ao analisar um cód
 
 ------------------------------------------------------------
 
-(3) DEDUÇÃO DE PADRÕES INCOMPLETOS / AMBIGUIDADE:
+(3) PADRÕES INCOMPLETOS POR SOBRECARREGAMENTO:
   ⚠️  [LINHA 88] PADRÃO INCOMPLETO (Mode Pattern):
      O Mode 'Sintoma' está faltando: @characterization.
 
