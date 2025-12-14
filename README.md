@@ -265,18 +265,6 @@ genset LifeStages {
        ├── Geral: Person
        └── Específicos: Child, Adult
 ```
-## 🔍 Fase 3 — Análise Semântica (Em Breve)
-
-A próxima etapa consistirá na validação das regras lógicas da ontologia, como:
-
-  * Verificação de tipos incompatíveis.
-  * Consistência das cardinalidades e naturezas ontológicas.
-  * Checagem de identificadores não declarados.
-
-<!-- end list -->
-
-```
-```
 =======
 ## 🧠 Fase 3 — Análise Semântica
 
